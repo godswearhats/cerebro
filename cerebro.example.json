@@ -1,0 +1,16 @@
+{
+  "source_dirs": ["src"],
+  "source_globs": ["*.cpp", "*.cc", "*.c"],
+  "exclude_patterns": [],
+  "build_command": "make -j$(nproc)",
+  "test_command": "./run_tests",
+  "test_timeout_seconds": 30,
+  "build_timeout_seconds": 120,
+  "preset": "STANDARD",
+  "threshold": 60,
+  "workers": 0,
+  "build_jobs": 2,
+  "build_tree": ".",
+  "cache_dir": ".cerebro_cache",
+  "report_dir": ".cerebro_reports"
+}
