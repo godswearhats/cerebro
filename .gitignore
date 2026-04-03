@@ -1,4 +1,4 @@
-.cerebro_cache/
-.cerebro_reports/
+.cerebro_cache*/
+.cerebro_reports*/
 __pycache__/
 *.pyc
