@@ -1,16 +1,16 @@
-"""cerebro language plugin — C/C++."""
+"""cerebro language plugin — TypeScript / JavaScript."""
 
 from __future__ import annotations
 
-from cerebro import SHARED_OPERATORS, OperatorDef
+from cerebro.operators import SHARED_OPERATORS, OperatorDef
 
 
 # ---------------------------------------------------------------------------
-# C++-specific mutation operators
+# TypeScript-specific mutation operators
 # ---------------------------------------------------------------------------
 
-_CPP_STANDARD: list[OperatorDef] = [
-    # Logical (C-style)
+_TS_STANDARD: list[OperatorDef] = [
+    # Logical (C-style, same as C++)
     OperatorDef("log_and_to_or", "logical", r"&&", "||", "&& → ||"),
     OperatorDef("log_or_to_and", "logical", r"\|\|", "&&", "|| → &&"),
     # Unary
@@ -18,28 +18,45 @@ _CPP_STANDARD: list[OperatorDef] = [
     # Increment / Decrement
     OperatorDef("inc_to_dec", "increment", r"\+\+", "--", "++ → --"),
     OperatorDef("dec_to_inc", "increment", r"(?<!-)--(?!>)", "++", "-- → ++"),
-    # Void call removal
+    # Strict equality (TypeScript-specific)
+    OperatorDef("rel_strict_eq_to_neq", "relational", r"===", "!==", "=== → !=="),
+    OperatorDef("rel_strict_neq_to_eq", "relational", r"!==", "===", "!== → ==="),
+    # Nullish coalescing
+    OperatorDef("nullish_to_or", "logical", r"\?\?", "||", "?? → ||"),
+    # Optional chaining removal (a?.b → a.b)
+    OperatorDef("optional_chain_remove", "optional_chaining", r"\?\.", ".", "?. → ."),
+    # Arrow function body removal (() => expr → () => undefined)
+    # Matches "=> expr" not followed by { (block body) or already undefined.
+    # Anchored by ") =>" to avoid matching type annotations like ": () => string".
+    OperatorDef(
+        "arrow_to_undefined",
+        "arrow_function",
+        r"(?<=\))\s*=>\s+(?!undefined\b|\{).+",
+        " => undefined",
+        "=> expr → => undefined",
+    ),
+    # Void call removal (includes await)
     OperatorDef(
         "void_call_remove", "void_call",
-        r"^\s*(?:[a-zA-Z_]\w*(?:::|->|\.))*[a-zA-Z_]\w*\s*\([^)]*\)\s*;",
+        r"^\s*(?:await\s+)?(?:[a-zA-Z_$]\w*\.)*[a-zA-Z_$]\w*\s*\([^)]*\)\s*;",
         ";", "foo(); → ;",
     ),
-    # Null return (C++ uses nullptr)
+    # Null return
     OperatorDef(
-        "return_nullptr", "return_value",
-        r"return\s+(?!nullptr\b).+;", "return nullptr;",
-        "return expr → return nullptr",
+        "return_null", "return_value",
+        r"return\s+(?!null\b).+;", "return null;",
+        "return expr → return null",
     ),
 ]
 
-_CPP_STRONGER: list[OperatorDef] = [
+_TS_STRONGER: list[OperatorDef] = [
     # Return value
     OperatorDef(
-        "return_zero",
+        "return_undefined",
         "return_value",
-        r"return\s+(?!0\s*;).+;",
-        "return 0;",
-        "return expr → return 0",
+        r"return\s+(?!undefined\b).+;",
+        "return undefined;",
+        "return expr → return undefined",
     ),
     # Condition removal
     OperatorDef(
@@ -56,19 +73,34 @@ _CPP_STRONGER: list[OperatorDef] = [
         "if (false)",
         "if(cond) → if(false)",
     ),
+    # String literal emptying ("foo" → "")
+    OperatorDef(
+        "string_empty_double",
+        "string_literal",
+        r'"[^"\\](?:[^"\\]|\\.)*"',
+        '""',
+        '"str" → ""',
+    ),
+    OperatorDef(
+        "string_empty_single",
+        "string_literal",
+        r"'[^'\\](?:[^'\\]|\\.)*'",
+        "''",
+        "'str' → ''",
+    ),
     # Statement removal (assignments, increments — not bare calls or control flow)
     OperatorDef(
         "stmt_remove", "statement",
-        r"^\s*(?:[a-zA-Z_]\w*(?:\.|->|::))*[a-zA-Z_]\w*\s*(?:\+\+|--|(?:[+\-*/%&|^]|<<|>>)?=.+)\s*;",
+        r"^\s*(?:[a-zA-Z_$]\w*\.)*[a-zA-Z_$]\w*\s*(?:\+\+|--|(?:[+\-*/%&|^]|<<|>>)?=.+)\s*;",
         ";", "statement → ;",
     ),
     # Switch: break removal (creates fallthrough)
     OperatorDef("switch_break_remove", "switch", r"^\s*break\s*;", ";", "break; → ; (fallthrough)"),
     # Switch: case value mutation
-    OperatorDef("switch_case_zero", "switch", r"case\s+(?!0\s*:)\w+\s*:", "case 0:", "case X: → case 0:"),
+    OperatorDef("switch_case_zero", "switch", r"case\s+(?!0\s*:).+?\s*:", "case 0:", "case X: → case 0:"),
 ]
 
-_CPP_ALL: list[OperatorDef] = [
+_TS_ALL: list[OperatorDef] = [
     OperatorDef("const_zero_to_one", "constant", r"\b0\b", "1", "0 → 1"),
     OperatorDef("const_one_to_zero", "constant", r"(?<!\.)(?<!\d)\b1\b(?!\.)", "0", "1 → 0"),
 ]
@@ -78,39 +110,57 @@ def _build_presets() -> dict[str, list[OperatorDef]]:
     shared = SHARED_OPERATORS["STANDARD"]
     shared_stronger = SHARED_OPERATORS["STRONGER_EXTRA"]
 
-    standard = shared + _CPP_STANDARD
-    stronger = standard + shared_stronger + _CPP_STRONGER
-    all_ops = stronger + _CPP_ALL
+    standard = shared + _TS_STANDARD
+    stronger = standard + shared_stronger + _TS_STRONGER
+    all_ops = stronger + _TS_ALL
     return {"STANDARD": standard, "STRONGER": stronger, "ALL": all_ops}
 
 
 # ---------------------------------------------------------------------------
-# C/C++ code masking
+# TypeScript / JavaScript code masking
 # ---------------------------------------------------------------------------
 
 
-def compute_code_masks_cpp(lines: list[str]) -> tuple[list[list[bool]], list[bool]]:
+def compute_code_masks_typescript(lines: list[str]) -> tuple[list[list[bool]], list[bool]]:
     """Return per-character masks (True = mutable code) and per-line skip flags.
 
-    Handles: block comments, line comments, string literals, char literals,
-    preprocessor directives.
+    Handles: block comments, line comments, double-quoted strings,
+    single-quoted strings, template literals (backtick), decorators.
     """
     masks: list[list[bool]] = []
     skip_line: list[bool] = []
     in_block_comment = False
+    in_template_literal = False
 
     for line in lines:
         mask = [True] * len(line)
         stripped = line.lstrip()
-        is_pp = stripped.startswith("#")
-        skip_line.append(is_pp)
 
-        if is_pp and not in_block_comment:
+        # Skip decorator lines (@Injectable, etc.)
+        is_decorator = stripped.startswith("@") and not in_block_comment and not in_template_literal
+        skip_line.append(is_decorator)
+        if is_decorator:
             masks.append([False] * len(line))
             continue
 
         i = 0
         while i < len(line):
+            # Continue template literal from previous line
+            if in_template_literal:
+                mask[i] = False
+                if line[i] == "\\":
+                    i += 1
+                    if i < len(line):
+                        mask[i] = False
+                    i += 1
+                    continue
+                if line[i] == "`":
+                    in_template_literal = False
+                    i += 1
+                    continue
+                i += 1
+                continue
+
             if in_block_comment:
                 mask[i] = False
                 if i + 1 < len(line) and line[i] == "*" and line[i + 1] == "/":
@@ -137,8 +187,8 @@ def compute_code_masks_cpp(lines: list[str]) -> tuple[list[list[bool]], list[boo
                     mask[j] = False
                 break
 
-            # String literal
-            if ch == '"':
+            # Template literal (backtick)
+            if ch == "`":
                 mask[i] = False
                 i += 1
                 while i < len(line):
@@ -149,16 +199,20 @@ def compute_code_masks_cpp(lines: list[str]) -> tuple[list[list[bool]], list[boo
                             mask[i] = False
                             i += 1
                         continue
-                    if line[i] == '"':
+                    if line[i] == "`":
                         mask[i] = False
                         i += 1
                         break
                     mask[i] = False
                     i += 1
+                else:
+                    # Backtick not closed — multi-line template literal
+                    in_template_literal = True
                 continue
 
-            # Char literal
-            if ch == "'":
+            # String literals (double or single quoted)
+            if ch in ('"', "'"):
+                end_ch = ch
                 mask[i] = False
                 i += 1
                 while i < len(line):
@@ -169,7 +223,7 @@ def compute_code_masks_cpp(lines: list[str]) -> tuple[list[list[bool]], list[boo
                             mask[i] = False
                             i += 1
                         continue
-                    if line[i] == "'":
+                    if line[i] == end_ch:
                         mask[i] = False
                         i += 1
                         break
@@ -189,9 +243,9 @@ def compute_code_masks_cpp(lines: list[str]) -> tuple[list[list[bool]], list[boo
 # ---------------------------------------------------------------------------
 
 LANGUAGE = {
-    "name": "cpp",
-    "source_globs": ["*.cpp", "*.cc", "*.cxx", "*.c"],
-    "build_required": True,
-    "compute_code_masks": compute_code_masks_cpp,
+    "name": "typescript",
+    "source_globs": ["*.ts", "*.tsx", "*.js", "*.jsx"],
+    "build_required": False,
+    "compute_code_masks": compute_code_masks_typescript,
     "operators": _build_presets(),
 }

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cerebro import SHARED_OPERATORS, OperatorDef
+from cerebro.operators import SHARED_OPERATORS, OperatorDef
 
 
 # ---------------------------------------------------------------------------
