@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""cerebro — Source-level mutation testing for C/C++.
+"""cerebro — Multi-language source-level mutation testing.
 
 A reusable, zero-dependency mutation testing tool that patches source files,
-recompiles, runs tests, and reports which mutations survived.
+optionally recompiles, runs tests, and reports which mutations survived.
+Language support is provided by plugins (cerebro_lang_*.py).
 
 Usage:
     python cerebro.py run [--config cerebro.json] [--workers N] [--file path]
@@ -19,6 +20,7 @@ import concurrent.futures
 import fnmatch
 import hashlib
 import html as html_module
+import importlib.util
 import json
 import multiprocessing
 import os
@@ -59,10 +61,15 @@ class OperatorDef:
     description: str
 
 
-def _define_operators() -> dict[str, list[OperatorDef]]:
-    """Define all mutation operators grouped by preset level."""
+# ---------------------------------------------------------------------------
+# Shared mutation operators (language-agnostic)
+#
+# These are used by language plugins to compose their preset tiers.
+# Plugins import SHARED_OPERATORS and combine with language-specific extras.
+# ---------------------------------------------------------------------------
 
-    standard: list[OperatorDef] = [
+SHARED_OPERATORS: dict[str, list[OperatorDef]] = {
+    "STANDARD": [
         # --- Relational ---
         OperatorDef("rel_lt_to_lte", "relational", r"(?<![<\-])< (?![<=<])", "<=", "< → <="),
         OperatorDef("rel_lte_to_lt", "relational", r"(?<![<])<=", "<", "<= → <"),
@@ -75,72 +82,184 @@ def _define_operators() -> dict[str, list[OperatorDef]]:
         OperatorDef("arith_sub_to_add", "arithmetic", r"(?<![->]) *\-(?![->=-])", "+", "- → +"),
         OperatorDef("arith_mul_to_div", "arithmetic", r"(?<![/]) *\*(?![*=])", "/", "* → /"),
         OperatorDef("arith_div_to_mul", "arithmetic", r"(?<![*/]) */(?![/=*])", "*", "/ → *"),
-        # --- Logical ---
-        OperatorDef("log_and_to_or", "logical", r"&&", "||", "&& → ||"),
-        OperatorDef("log_or_to_and", "logical", r"\|\|", "&&", "|| → &&"),
-        # --- Unary ---
-        OperatorDef("unary_neg_remove", "unary", r"!(?![!=])", "", "!x → x"),
-        # --- Increment / Decrement ---
-        OperatorDef("inc_to_dec", "increment", r"\+\+", "--", "++ → --"),
-        OperatorDef("dec_to_inc", "increment", r"(?<!-)--(?!>)", "++", "-- → ++"),
         # --- Boolean literal ---
         OperatorDef("bool_true_to_false", "boolean", r"\btrue\b", "false", "true → false"),
         OperatorDef("bool_false_to_true", "boolean", r"\bfalse\b", "true", "false → true"),
-    ]
-
-    stronger_extra: list[OperatorDef] = [
+        # --- Invert negatives ---
+        OperatorDef("unary_minus_remove", "unary", r"(?<![a-zA-Z_0-9)\]])-(?=[a-zA-Z_\d(])", "", "-x → x"),
+    ],
+    "STRONGER_EXTRA": [
         # --- Assignment operators ---
         OperatorDef("assign_add_to_sub", "assignment", r"\+=", "-=", "+= → -="),
         OperatorDef("assign_sub_to_add", "assignment", r"(?<![->])-=", "+=", "-= → +="),
         OperatorDef("assign_mul_to_div", "assignment", r"\*=", "/=", "*= → /="),
         OperatorDef("assign_div_to_mul", "assignment", r"/=", "*=", "/= → *="),
-        # --- Return value ---
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# Language plugin discovery
+# ---------------------------------------------------------------------------
+
+# Built-in C++ fallback — used when no cerebro_lang_cpp.py plugin is found.
+# This keeps cerebro.py fully functional as a standalone file.
+
+def _builtin_cpp_code_masks(lines: list[str]) -> tuple[list[list[bool]], list[bool]]:
+    """C/C++ code masking (built-in fallback). See cerebro_lang_cpp.py for the
+    primary implementation with comments."""
+    masks: list[list[bool]] = []
+    skip_line: list[bool] = []
+    in_block = False
+    for line in lines:
+        mask = [True] * len(line)
+        stripped = line.lstrip()
+        is_pp = stripped.startswith("#")
+        skip_line.append(is_pp)
+        if is_pp and not in_block:
+            masks.append([False] * len(line))
+            continue
+        i = 0
+        while i < len(line):
+            if in_block:
+                mask[i] = False
+                if i + 1 < len(line) and line[i] == "*" and line[i + 1] == "/":
+                    mask[i + 1] = False
+                    in_block = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+            ch = line[i]
+            if ch == "/" and i + 1 < len(line) and line[i + 1] == "*":
+                mask[i] = mask[i + 1] = False
+                in_block = True
+                i += 2
+                continue
+            if ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
+                for j in range(i, len(line)):
+                    mask[j] = False
+                break
+            if ch in ('"', "'"):
+                end_ch = ch
+                mask[i] = False
+                i += 1
+                while i < len(line):
+                    if line[i] == "\\":
+                        mask[i] = False
+                        i += 1
+                        if i < len(line):
+                            mask[i] = False
+                            i += 1
+                        continue
+                    if line[i] == end_ch:
+                        mask[i] = False
+                        i += 1
+                        break
+                    mask[i] = False
+                    i += 1
+                continue
+            i += 1
+        masks.append(mask)
+    return masks, skip_line
+
+
+def _builtin_cpp_operators() -> dict[str, list[OperatorDef]]:
+    """Build C++ operator presets using shared + C++-specific operators (fallback)."""
+    cpp_standard_extra = [
+        OperatorDef("log_and_to_or", "logical", r"&&", "||", "&& → ||"),
+        OperatorDef("log_or_to_and", "logical", r"\|\|", "&&", "|| → &&"),
+        OperatorDef("unary_neg_remove", "unary", r"!(?![!=])", "", "!x → x"),
+        OperatorDef("inc_to_dec", "increment", r"\+\+", "--", "++ → --"),
+        OperatorDef("dec_to_inc", "increment", r"(?<!-)--(?!>)", "++", "-- → ++"),
+        # Void call removal
         OperatorDef(
-            "return_zero",
-            "return_value",
-            r"return\s+(?!0\s*;).+;",
-            "return 0;",
-            "return expr → return 0",
+            "void_call_remove", "void_call",
+            r"^\s*(?:[a-zA-Z_]\w*(?:::|->|\.))*[a-zA-Z_]\w*\s*\([^)]*\)\s*;",
+            ";", "foo(); → ;",
         ),
-        # --- Condition removal ---
+        # Null return (C++ uses nullptr)
         OperatorDef(
-            "cond_to_true",
-            "condition",
-            r"if\s*\((?!true\)).+?\)",
-            "if (true)",
-            "if(cond) → if(true)",
-        ),
-        OperatorDef(
-            "cond_to_false",
-            "condition",
-            r"if\s*\((?!false\)).+?\)",
-            "if (false)",
-            "if(cond) → if(false)",
+            "return_nullptr", "return_value",
+            r"return\s+(?!nullptr\b).+;", "return nullptr;",
+            "return expr → return nullptr",
         ),
     ]
-
-    all_extra: list[OperatorDef] = [
-        # --- Constant mutations ---
+    cpp_stronger_extra = [
+        OperatorDef("return_zero", "return_value", r"return\s+(?!0\s*;).+;", "return 0;", "return expr → return 0"),
+        OperatorDef("cond_to_true", "condition", r"if\s*\((?!true\)).+?\)", "if (true)", "if(cond) → if(true)"),
+        OperatorDef("cond_to_false", "condition", r"if\s*\((?!false\)).+?\)", "if (false)", "if(cond) → if(false)"),
+        # Statement removal
+        OperatorDef(
+            "stmt_remove", "statement",
+            r"^\s*(?:[a-zA-Z_]\w*(?:\.|->|::))*[a-zA-Z_]\w*\s*(?:\+\+|--|(?:[+\-*/%&|^]|<<|>>)?=.+)\s*;",
+            ";", "statement → ;",
+        ),
+        # Switch: break removal (creates fallthrough)
+        OperatorDef("switch_break_remove", "switch", r"^\s*break\s*;", ";", "break; → ; (fallthrough)"),
+        # Switch: case value mutation
+        OperatorDef("switch_case_zero", "switch", r"case\s+(?!0\s*:)\w+\s*:", "case 0:", "case X: → case 0:"),
+    ]
+    cpp_all_extra = [
         OperatorDef("const_zero_to_one", "constant", r"\b0\b", "1", "0 → 1"),
         OperatorDef("const_one_to_zero", "constant", r"(?<!\.)(?<!\d)\b1\b(?!\.)", "0", "1 → 0"),
     ]
-
-    return {
-        "STANDARD": standard,
-        "STRONGER": standard + stronger_extra,
-        "ALL": standard + stronger_extra + all_extra,
-    }
+    standard = SHARED_OPERATORS["STANDARD"] + cpp_standard_extra
+    stronger = standard + SHARED_OPERATORS["STRONGER_EXTRA"] + cpp_stronger_extra
+    return {"STANDARD": standard, "STRONGER": stronger, "ALL": stronger + cpp_all_extra}
 
 
-OPERATOR_PRESETS = _define_operators()
+_BUILTIN_CPP: dict = {
+    "name": "cpp",
+    "source_globs": ["*.cpp", "*.cc", "*.cxx", "*.c"],
+    "build_required": True,
+    "compute_code_masks": _builtin_cpp_code_masks,
+    "operators": _builtin_cpp_operators(),
+}
+
+
+def _discover_languages() -> dict[str, dict]:
+    """Find cerebro_lang_*.py plugins next to this file and return {name: LANGUAGE dict}."""
+    here = Path(__file__).resolve().parent
+    langs: dict[str, dict] = {}
+    for p in sorted(here.glob("cerebro_lang_*.py")):
+        try:
+            spec = importlib.util.spec_from_file_location(p.stem, p)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            lang = getattr(mod, "LANGUAGE", None)
+            if isinstance(lang, dict) and "name" in lang:
+                langs[lang["name"]] = lang
+        except Exception as exc:
+            warn(f"Failed to load language plugin {p.name}: {exc}")
+    return langs
+
+
+def load_language(name: str) -> dict:
+    """Load a language plugin by name. Falls back to built-in C++ if no plugin found."""
+    plugins = _discover_languages()
+    if name in plugins:
+        return plugins[name]
+    if name == "cpp":
+        return _BUILTIN_CPP
+    available = sorted(set(list(plugins.keys()) + ["cpp"]))
+    die(f"Unknown language: {name!r}. Available: {', '.join(available)}")
+    return {}  # unreachable, satisfies type checker
+
+
+# Backward-compatible module-level presets (used by CLI before config is loaded)
+OPERATOR_PRESETS = _BUILTIN_CPP["operators"]
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG = {
+    "language": "cpp",
     "source_dirs": [],
-    "source_globs": ["*.cpp", "*.cc", "*.cxx", "*.c"],
+    "source_globs": [],
     "exclude_patterns": [],
     "build_command": "",
     "test_command": "",
@@ -158,6 +277,7 @@ DEFAULT_CONFIG = {
 
 @dataclass
 class Config:
+    language: str
     source_dirs: list[str]
     source_globs: list[str]
     exclude_patterns: list[str]
@@ -173,6 +293,7 @@ class Config:
     cache_dir: str
     report_dir: str
     project_root: str = ""  # resolved absolute path to config file's directory
+    lang_plugin: dict = field(default_factory=dict)  # loaded language plugin
 
     @staticmethod
     def load(config_path: str) -> Config:
@@ -184,9 +305,21 @@ class Config:
         merged = {**DEFAULT_CONFIG, **user}
         cfg = Config(**{k: v for k, v in merged.items() if k in Config.__dataclass_fields__})
         cfg.project_root = str(path.parent)
-        if cfg.preset not in OPERATOR_PRESETS:
-            die(f"Unknown preset: {cfg.preset!r}. Choose from: {', '.join(OPERATOR_PRESETS)}")
-        if not cfg.build_command:
+
+        # Load language plugin
+        cfg.lang_plugin = load_language(cfg.language)
+
+        # Apply plugin defaults for source_globs if not set in config
+        if not cfg.source_globs:
+            cfg.source_globs = cfg.lang_plugin.get("source_globs", ["*"])
+
+        # Validate operator preset against the active language
+        lang_operators = cfg.lang_plugin.get("operators", OPERATOR_PRESETS)
+        if cfg.preset not in lang_operators:
+            die(f"Unknown preset: {cfg.preset!r}. Choose from: {', '.join(lang_operators)}")
+
+        build_required = cfg.lang_plugin.get("build_required", True)
+        if build_required and not cfg.build_command:
             die("build_command is required in config.")
         if not cfg.test_command:
             die("test_command is required in config.")
@@ -226,6 +359,9 @@ def discover_sources(cfg: Config) -> list[str]:
                 if any(fnmatch.fnmatch(rel, ep) or fnmatch.fnmatch(fname, ep) for ep in cfg.exclude_patterns):
                     continue
                 sources.append(rel)
+    # Deduplicate: overlapping source_dirs can discover the same file
+    # multiple times via os.walk (e.g. "src" and "src/app" both walk "src/app").
+    sources = list(dict.fromkeys(sources))
     sources.sort()
     return sources
 
@@ -235,100 +371,8 @@ def discover_sources(cfg: Config) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def compute_code_masks(lines: list[str]) -> tuple[list[list[bool]], list[bool]]:
-    """Return per-character masks (True = mutable code) and per-line preprocessor flags.
-
-    Handles: block comments, line comments, string literals, char literals.
-    Also flags preprocessor lines (starting with #).
-    """
-    masks: list[list[bool]] = []
-    is_preprocessor: list[bool] = []
-    in_block_comment = False
-
-    for line in lines:
-        mask = [True] * len(line)
-        stripped = line.lstrip()
-        is_pp = stripped.startswith("#")
-        is_preprocessor.append(is_pp)
-
-        if is_pp and not in_block_comment:
-            # Mark entire preprocessor line as non-mutable
-            masks.append([False] * len(line))
-            continue
-
-        i = 0
-        while i < len(line):
-            if in_block_comment:
-                mask[i] = False
-                if i + 1 < len(line) and line[i] == "*" and line[i + 1] == "/":
-                    mask[i + 1] = False
-                    in_block_comment = False
-                    i += 2
-                    continue
-                i += 1
-                continue
-
-            ch = line[i]
-
-            # Block comment start
-            if ch == "/" and i + 1 < len(line) and line[i + 1] == "*":
-                mask[i] = False
-                mask[i + 1] = False
-                in_block_comment = True
-                i += 2
-                continue
-
-            # Line comment
-            if ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
-                for j in range(i, len(line)):
-                    mask[j] = False
-                break
-
-            # String literal
-            if ch == '"':
-                mask[i] = False
-                i += 1
-                while i < len(line):
-                    if line[i] == "\\":
-                        mask[i] = False
-                        i += 1
-                        if i < len(line):
-                            mask[i] = False
-                            i += 1
-                        continue
-                    if line[i] == '"':
-                        mask[i] = False
-                        i += 1
-                        break
-                    mask[i] = False
-                    i += 1
-                continue
-
-            # Char literal
-            if ch == "'":
-                mask[i] = False
-                i += 1
-                while i < len(line):
-                    if line[i] == "\\":
-                        mask[i] = False
-                        i += 1
-                        if i < len(line):
-                            mask[i] = False
-                            i += 1
-                        continue
-                    if line[i] == "'":
-                        mask[i] = False
-                        i += 1
-                        break
-                    mask[i] = False
-                    i += 1
-                continue
-
-            i += 1
-
-        masks.append(mask)
-
-    return masks, is_preprocessor
+## Code masking is provided by language plugins via the compute_code_masks callable.
+## See cerebro_lang_cpp.py / cerebro_lang_gdscript.py for implementations.
 
 
 # ---------------------------------------------------------------------------
@@ -361,10 +405,17 @@ class MutationResult:
 # ---------------------------------------------------------------------------
 
 
-def generate_mutations(file_path: str, content: str, operators: list[OperatorDef]) -> list[Mutation]:
+def generate_mutations(
+    file_path: str,
+    content: str,
+    operators: list[OperatorDef],
+    mask_fn: callable = None,
+) -> list[Mutation]:
     """Scan a source file and produce all candidate mutations."""
     lines = content.splitlines()
-    masks, is_pp = compute_code_masks(lines)
+    if mask_fn is None:
+        mask_fn = _builtin_cpp_code_masks
+    masks, is_pp = mask_fn(lines)
     mutations: list[Mutation] = []
 
     for line_idx, line in enumerate(lines):
@@ -458,16 +509,17 @@ def classify_outcome(
     """Build and test a single mutation, returning the classified result."""
     t0 = time.monotonic()
 
-    # Build
-    rc, output = run_command(build_cmd, cwd, build_timeout)
-    if rc != 0:
-        status = TIMEOUT if rc == -1 else BUILD_ERROR
-        return MutationResult(
-            mutation=mutation,
-            status=status,
-            duration_seconds=time.monotonic() - t0,
-            detail=output[:500] if status == BUILD_ERROR else "Build timed out",
-        )
+    # Build (skip for interpreted languages with no build command)
+    if build_cmd:
+        rc, output = run_command(build_cmd, cwd, build_timeout)
+        if rc != 0:
+            status = TIMEOUT if rc == -1 else BUILD_ERROR
+            return MutationResult(
+                mutation=mutation,
+                status=status,
+                duration_seconds=time.monotonic() - t0,
+                detail=output[:500] if status == BUILD_ERROR else "Build timed out",
+            )
 
     # Test
     rc, output = run_command(test_cmd, cwd, test_timeout)
@@ -713,7 +765,9 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
     """Main execution: scan, (optionally cache-skip), build sandboxes, run mutations."""
     signal.signal(signal.SIGINT, _sigint_handler)
 
-    operators = OPERATOR_PRESETS[cfg.preset]
+    lang_operators = cfg.lang_plugin.get("operators", OPERATOR_PRESETS)
+    operators = lang_operators[cfg.preset]
+    mask_fn = cfg.lang_plugin.get("compute_code_masks", _builtin_cpp_code_masks)
     sources = discover_sources(cfg)
     if file_filter:
         sources = [s for s in sources if file_filter in s]
@@ -755,7 +809,7 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
             info(f"  {src}: {len(cached_file.get('mutations', []))} mutations (cached)")
             continue
 
-        mutations = generate_mutations(src, content, operators)
+        mutations = generate_mutations(src, content, operators, mask_fn)
         all_mutations.extend(mutations)
         info(f"  {src}: {len(mutations)} mutations")
 
@@ -804,22 +858,23 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
         # Parallel mode: create sandboxes
         info(f"\nCreating {num_workers} worker sandbox(es)...")
         sandboxes = create_sandboxes(cfg.project_root, cfg.build_tree, num_workers)
-        # Warm up each sandbox with a no-op build so SCons rebuilds its
-        # dependency database. This is a one-time ~45s cost per sandbox but
-        # makes subsequent incremental builds ~7x faster.
-        info(f"Warming up {num_workers} sandbox(es) (parallel no-op builds)...")
-        warmup_t0 = time.monotonic()
-        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as warmup_pool:
-            warmup_futures = [
-                warmup_pool.submit(run_command, build_cmd, sb, cfg.build_timeout_seconds)
-                for sb in sandboxes
-            ]
-            for i, fut in enumerate(concurrent.futures.as_completed(warmup_futures)):
-                rc, _ = fut.result()
-                if rc != 0:
-                    warn(f"Sandbox {i} warmup build failed (exit {rc}), mutations may be slow.")
-        warmup_elapsed = time.monotonic() - warmup_t0
-        info(f"Warmup done in {warmup_elapsed:.0f}s. Running {total_new} mutations across {num_workers} workers...\n")
+        # Warm up each sandbox with a no-op build so the build system rebuilds
+        # its dependency database. Skip for interpreted languages (no build step).
+        if build_cmd:
+            info(f"Warming up {num_workers} sandbox(es) (parallel no-op builds)...")
+            warmup_t0 = time.monotonic()
+            with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as warmup_pool:
+                warmup_futures = [
+                    warmup_pool.submit(run_command, build_cmd, sb, cfg.build_timeout_seconds)
+                    for sb in sandboxes
+                ]
+                for i, fut in enumerate(concurrent.futures.as_completed(warmup_futures)):
+                    rc, _ = fut.result()
+                    if rc != 0:
+                        warn(f"Sandbox {i} warmup build failed (exit {rc}), mutations may be slow.")
+            warmup_elapsed = time.monotonic() - warmup_t0
+            info(f"Warmup done in {warmup_elapsed:.0f}s.")
+        info(f"Running {total_new} mutations across {num_workers} workers...\n")
 
         # Build work queue: round-robin assign mutations to sandboxes
         work_items: list[tuple] = []
@@ -1186,10 +1241,18 @@ def die(msg: str):
 
 def cmd_list_operators(args: argparse.Namespace):
     preset = args.preset or "STANDARD"
-    if preset not in OPERATOR_PRESETS:
+    # Load language plugin if config is provided, else use default C++ operators
+    if args.config and os.path.exists(args.config):
+        cfg = Config.load(args.config)
+        lang_ops = cfg.lang_plugin.get("operators", OPERATOR_PRESETS)
+        lang_name = cfg.language
+    else:
+        lang_ops = OPERATOR_PRESETS
+        lang_name = "cpp"
+    if preset not in lang_ops:
         die(f"Unknown preset: {preset!r}")
-    ops = OPERATOR_PRESETS[preset]
-    print(f"\nMutation operators for preset {preset} ({len(ops)} operators):\n")
+    ops = lang_ops[preset]
+    print(f"\nMutation operators for {lang_name}/{preset} ({len(ops)} operators):\n")
     categories: dict[str, list[OperatorDef]] = {}
     for op in ops:
         categories.setdefault(op.category, []).append(op)
@@ -1204,7 +1267,9 @@ def cmd_dry_run(args: argparse.Namespace):
     cfg = Config.load(args.config)
     if args.preset:
         cfg.preset = args.preset
-    operators = OPERATOR_PRESETS[cfg.preset]
+    lang_operators = cfg.lang_plugin.get("operators", OPERATOR_PRESETS)
+    operators = lang_operators[cfg.preset]
+    mask_fn = cfg.lang_plugin.get("compute_code_masks", _builtin_cpp_code_masks)
     sources = discover_sources(cfg)
     if args.file:
         sources = [s for s in sources if args.file in s]
@@ -1219,7 +1284,7 @@ def cmd_dry_run(args: argparse.Namespace):
         abs_path = cfg.resolve(src)
         with open(abs_path) as f:
             content = f.read()
-        mutations = generate_mutations(src, content, operators)
+        mutations = generate_mutations(src, content, operators, mask_fn)
         total += len(mutations)
         print(f"{src}: {len(mutations)} mutations")
         for m in mutations:
@@ -1240,9 +1305,11 @@ def cmd_run(args: argparse.Namespace):
         cfg.workers = args.workers
 
     info(f"cerebro — mutation testing")
+    info(f"  Language:  {cfg.language}")
     info(f"  Preset:    {cfg.preset}")
     info(f"  Threshold: {cfg.threshold}%")
-    info(f"  Build:     {cfg.build_command}")
+    if cfg.build_command:
+        info(f"  Build:     {cfg.build_command}")
     info(f"  Test:      {cfg.test_command}")
     info("")
 
@@ -1316,16 +1383,17 @@ def cmd_report(args: argparse.Namespace):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    preset_names = list(OPERATOR_PRESETS.keys())
     parser = argparse.ArgumentParser(
         prog="cerebro",
-        description="Source-level mutation testing for C/C++",
+        description="Multi-language source-level mutation testing",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # run
     p_run = sub.add_parser("run", help="Run mutation testing")
     p_run.add_argument("--config", default="cerebro.json", help="Config file path (default: cerebro.json)")
-    p_run.add_argument("--preset", choices=list(OPERATOR_PRESETS.keys()), help="Override preset")
+    p_run.add_argument("--preset", choices=preset_names, help="Override preset")
     p_run.add_argument("--threshold", type=int, help="Override threshold percentage")
     p_run.add_argument("--workers", type=int, help="Number of parallel workers (0=auto, 1=sequential)")
     p_run.add_argument("--file", help="Only test files matching this substring")
@@ -1333,12 +1401,13 @@ def build_parser() -> argparse.ArgumentParser:
     # dry-run
     p_dry = sub.add_parser("dry-run", help="List mutations without executing")
     p_dry.add_argument("--config", default="cerebro.json", help="Config file path")
-    p_dry.add_argument("--preset", choices=list(OPERATOR_PRESETS.keys()), help="Override preset")
+    p_dry.add_argument("--preset", choices=preset_names, help="Override preset")
     p_dry.add_argument("--file", help="Only scan files matching this substring")
 
     # list-operators
     p_ops = sub.add_parser("list-operators", help="Show available mutation operators")
-    p_ops.add_argument("--preset", choices=list(OPERATOR_PRESETS.keys()), help="Preset to show (default: STANDARD)")
+    p_ops.add_argument("--config", default=None, help="Config file path (for language-specific operators)")
+    p_ops.add_argument("--preset", choices=preset_names, help="Preset to show (default: STANDARD)")
 
     # report
     p_rep = sub.add_parser("report", help="Regenerate report from cached results")

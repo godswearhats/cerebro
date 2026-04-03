@@ -1,0 +1,28 @@
+{
+  "language": "typescript",
+  "source_dirs": [
+    "server/src",
+    "server/src/app",
+    "server/src/app/domain/lobby"
+  ],
+  "source_globs": [
+    "auth.ts",
+    "authProviders.ts",
+    "authStore.ts",
+    "httpAuth.ts",
+    "matchmakingStore.ts",
+    "matchmakingStore.memory.ts",
+    "matchmakingStore.supabase.ts",
+    "config.ts",
+    "engine.ts"
+  ],
+  "exclude_patterns": [],
+  "test_command": "bash --login -c 'source ~/.nvm/nvm.sh && nvm use default && cd server && npm test'",
+  "test_timeout_seconds": 60,
+  "build_timeout_seconds": 60,
+  "preset": "STANDARD",
+  "threshold": 0,
+  "workers": 1,
+  "cache_dir": ".cerebro_cache_compare",
+  "report_dir": ".cerebro_reports_compare"
+}
