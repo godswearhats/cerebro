@@ -1,18 +1,11 @@
 {
-  "source_dirs": [
-    "client/engine/src/core"
-  ],
-  "source_globs": ["*.cpp"],
-  "exclude_patterns": ["balance_runner.cpp"],
-  "build_command": "DROPRUNNER_BUILD_TESTS=yes DROPRUNNER_SANITIZERS='address' scons platform=linux target=template_debug arch=x86_64 -C client/engine",
-  "test_command": "client/bin/droprunner_native_tests.linux.template_debug.x86_64 --abort-after=1",
+  "language": "python",
+  "source_dirs": ["src"],
+  "exclude_patterns": ["__pycache__", "lang/python.py"],
+  "test_command": "PYTHONPATH=src /home/aj/.local/bin/pytest tests/ -x -q",
   "test_timeout_seconds": 30,
-  "build_timeout_seconds": 120,
   "preset": "STANDARD",
   "threshold": 60,
   "workers": 0,
-  "build_jobs": 2,
-  "build_tree": "client",
-  "cache_dir": ".cerebro_cache",
   "report_dir": ".cerebro_reports"
 }
