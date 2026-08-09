@@ -4,7 +4,7 @@ Multi-language source-level mutation testing.
 
 Zero dependencies beyond Python 3.12+. Patches source files with small mutations (operator swaps, boolean flips, etc.), optionally recompiles, runs your test suite, and reports which mutations survived — revealing code your tests don't actually verify.
 
-Supports C/C++, TypeScript/JavaScript, and GDScript out of the box.
+Supports C/C++, Python, TypeScript/JavaScript, and GDScript out of the box.
 
 ## Installation
 
@@ -39,7 +39,8 @@ cerebro run
 ```
 --config FILE    Config file (default: cerebro.json)
 --workers N      Parallel workers (0 = auto, 1 = deterministic)
---file PATH      Run mutations on a single file only
+--file PATH      Run mutations on a single file. An exact relative path or file
+                 name wins; otherwise it is matched as a substring
 --preset NAME    Operator preset: STANDARD, STRONGER, ALL
 --format FMT     Report format: text, json, html
 ```
@@ -48,13 +49,21 @@ cerebro run
 
 See `cerebro.example.json` for all options:
 
-- **language** — `cpp`, `typescript`, or `gdscript` (default: `cpp`)
+- **language** — `cpp`, `python`, `typescript`, or `gdscript` (default: `cpp`)
 - **source_dirs** — directories to scan for source files
 - **source_globs** — file patterns to include (e.g. `*.cpp`); defaults to language's standard globs
 - **exclude_patterns** — files to skip
 - **build_command** — how to compile your project (required for compiled languages)
 - **test_command** — how to run your test suite
-- **build_tree** — subtree to copy for parallel sandboxes (`.` for whole repo)
+- **build_tree** — subtree to copy for parallel sandboxes; `""` or `.` for the
+  whole repo. Anything outside the subtree is symlinked into each sandbox
+  rather than copied, so name a subtree only when the rest of the repo is
+  read-only during a test run.
+- **sandbox_exclude** — extra entries to leave out of each worker's copy, on top
+  of `.git`/`__pycache__`/cerebro's own dirs. Use it for bulky directories the
+  tests never read (asset dumps, vendored toolchains). A bare name or glob
+  (`build`, `*.rom`) matches at any depth; include a `/` to pin it to one
+  location (`assets/generated`).
 - **preset** — mutation operator set (`STANDARD`, `STRONGER`, `ALL`)
 - **threshold** — minimum kill rate percentage to pass
 - **workers** — `0` for auto (CPU count), `1` for deterministic single-threaded

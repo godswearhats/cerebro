@@ -188,6 +188,7 @@ DEFAULT_CONFIG = {
     "workers": 0,
     "build_jobs": 2,
     "build_tree": "",
+    "sandbox_exclude": [],
     "cache_dir": ".cerebro_cache",
     "report_dir": ".cerebro_reports",
 }
@@ -210,6 +211,7 @@ class Config:
     build_tree: str
     cache_dir: str
     report_dir: str
+    sandbox_exclude: list[str] = field(default_factory=list)
     project_root: str = ""  # resolved absolute path to config file's directory
     lang_plugin: dict = field(default_factory=dict)  # loaded language plugin
 
@@ -282,6 +284,21 @@ def discover_sources(cfg: Config) -> list[str]:
     sources = list(dict.fromkeys(sources))
     sources.sort()
     return sources
+
+
+def select_sources(sources: list[str], file_filter: str | None) -> list[str]:
+    """Narrow discovered sources to a --file selection.
+
+    An exact relative path or file name wins outright, so `--file compress.py`
+    selects compress.py alone rather than dragging in decompress.py. Substring
+    matching remains the fallback for partial names.
+    """
+    if not file_filter:
+        return list(sources)
+    exact = [s for s in sources if s == file_filter or os.path.basename(s) == file_filter]
+    if exact:
+        return exact
+    return [s for s in sources if file_filter in s]
 
 
 # ---------------------------------------------------------------------------

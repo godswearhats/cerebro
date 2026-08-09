@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import atexit
 import concurrent.futures
+import fnmatch
 import hashlib
 import json
+import multiprocessing
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -16,7 +19,7 @@ import time
 
 from cerebro.types import Mutation, MutationResult, KILLED, SURVIVED, BUILD_ERROR, TIMEOUT
 from cerebro.mutation import generate_mutations, apply_mutation
-from cerebro.config import Config, discover_sources, builtin_cpp_code_masks, OPERATOR_PRESETS
+from cerebro.config import Config, discover_sources, select_sources, builtin_cpp_code_masks, OPERATOR_PRESETS
 
 
 # ---------------------------------------------------------------------------
@@ -25,8 +28,14 @@ from cerebro.config import Config, discover_sources, builtin_cpp_code_masks, OPE
 
 
 def run_command(command: str, cwd: str, timeout: int, env: dict | None = None) -> tuple[int, str]:
-    """Run a shell command, return (exit_code, combined output). -1 on timeout."""
-    merged_env = {**os.environ, **(env or {})}
+    """Run a shell command, return (exit_code, combined output). -1 on timeout.
+
+    Bytecode writing is disabled: CPython treats a .pyc as fresh when the
+    source's (mtime, size) match, and mutations of equal size applied within
+    the same second reuse the previous mutation's cached bytecode. The test
+    then runs against code that was never mutated and reports a survivor.
+    """
+    merged_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", **(env or {})}
     try:
         proc = subprocess.run(
             command,
@@ -100,7 +109,57 @@ def _sigint_handler(signum, frame):
     sys.exit(130)
 
 
-def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclude: set[str]):
+DEFAULT_SANDBOX_EXCLUDE = {".git", ".cerebro_cache", ".cerebro_reports", "__pycache__"}
+
+
+def _excluded(name: str, rel_path: str, patterns: set[str]) -> bool:
+    """True if a name or its project-relative path matches any exclude pattern.
+
+    A pattern without a separator matches the bare name at any depth, which is
+    what `__pycache__` wants. A pattern with one is matched against the
+    relative path instead, so `assets/generated` excludes that directory alone
+    rather than every `generated` in the tree.
+    """
+    for pattern in patterns:
+        cleaned = pattern.strip("/")
+        while cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        if not cleaned:
+            continue
+        target = rel_path if "/" in cleaned else name
+        if fnmatch.fnmatch(target, cleaned):
+            return True
+    return False
+
+
+def _sandbox_ignore(project_root: str, exclude_set: set[str]):
+    """shutil.copytree ignore callable that honours path-style patterns."""
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        rel_dir = os.path.relpath(directory, project_root)
+        prefix = "" if rel_dir == "." else rel_dir
+        return {n for n in names if _excluded(n, f"{prefix}/{n}" if prefix else n, exclude_set)}
+
+    return ignore
+
+
+def _normalize_build_tree(build_tree: str) -> str:
+    """Reduce a build_tree to a plain relative path; "" means the whole repo.
+
+    `.` and `./` are the documented way to say "whole repo", but they used to
+    reach the subtree branch below, where `os.listdir` never yields an entry
+    named `.` — so every entry was symlinked and each worker mutated the real
+    tree instead of its own copy.
+    """
+    cleaned = build_tree.strip().strip("/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return "" if cleaned == "." else cleaned
+
+
+def _smart_copy_tree(
+    src_dir: str, dst_dir: str, symlink_names: set[str], exclude: set[str], rel_base: str = ""
+):
     """Recursively copy a directory tree, symlinking named subdirectories at any depth.
 
     This significantly reduces sandbox creation time and disk usage for large
@@ -108,7 +167,8 @@ def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclud
     """
     os.makedirs(dst_dir, exist_ok=True)
     for entry in os.listdir(src_dir):
-        if entry in exclude:
+        rel = f"{rel_base}/{entry}" if rel_base else entry
+        if _excluded(entry, rel, exclude):
             continue
         src = os.path.join(src_dir, entry)
         dst = os.path.join(dst_dir, entry)
@@ -116,7 +176,7 @@ def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclud
             os.symlink(src, dst)
         elif os.path.isdir(src):
             # Recurse so we can symlink matching dirs at deeper levels
-            _smart_copy_tree(src, dst, symlink_names, exclude)
+            _smart_copy_tree(src, dst, symlink_names, exclude, rel)
         else:
             shutil.copy2(src, dst)
 
@@ -125,7 +185,7 @@ def create_sandboxes(
     project_root: str,
     build_tree: str,
     num_workers: int,
-    exclude: list[str] | None = None,
+    extra_exclude: list[str] | None = None,
 ) -> list[str]:
     """Create N sandbox copies of the project tree for parallel mutation testing.
 
@@ -135,8 +195,12 @@ def create_sandboxes(
 
     Large read-only directories (godot-cpp, extern, godot_cpp) within the
     build tree are symlinked rather than copied to save time and disk.
+
+    extra_exclude adds names or globs to DEFAULT_SANDBOX_EXCLUDE — for keeping
+    bulky directories the tests never read out of every worker's copy.
     """
-    exclude_set = set(exclude or [".git", ".cerebro_cache", ".cerebro_reports", "__pycache__"])
+    exclude_set = DEFAULT_SANDBOX_EXCLUDE | set(extra_exclude or [])
+    build_tree = _normalize_build_tree(build_tree)
     # Large read-only dirs that can be symlinked inside the build tree
     readonly_dirs = {"godot-cpp", "extern", "godot_cpp"}
     sandboxes: list[str] = []
@@ -147,18 +211,15 @@ def create_sandboxes(
         os.makedirs(root_mirror)
 
         if build_tree:
-            build_tree_top = build_tree.split("/")[0] if "/" in build_tree else build_tree
+            build_tree_top = build_tree.split("/")[0]
             for entry in os.listdir(project_root):
-                if entry in exclude_set:
+                if _excluded(entry, entry, exclude_set):
                     continue
                 src = os.path.join(project_root, entry)
                 dst = os.path.join(root_mirror, entry)
                 if entry == build_tree_top:
                     # Walk the build tree, symlinking read-only deps
-                    if build_tree_top == build_tree:
-                        _smart_copy_tree(src, dst, readonly_dirs, exclude_set)
-                    else:
-                        _smart_copy_tree(src, dst, readonly_dirs, exclude_set)
+                    _smart_copy_tree(src, dst, readonly_dirs, exclude_set, entry)
                 else:
                     os.symlink(src, dst)
         else:
@@ -167,7 +228,7 @@ def create_sandboxes(
                 root_mirror,
                 symlinks=True,
                 dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns(*exclude_set),
+                ignore=_sandbox_ignore(project_root, exclude_set),
             )
 
         sandboxes.append(root_mirror)
@@ -181,10 +242,48 @@ def create_sandboxes(
 # ---------------------------------------------------------------------------
 
 
+_worker_sandbox: str = ""
+
+SANDBOX_CLAIM_TIMEOUT_SECONDS = 60
+
+
+def _init_worker(sandbox_queue):
+    """Claim one sandbox for the lifetime of this pool process.
+
+    Sandboxes must not be handed out per work item: the pool is free to run
+    any item in any process, so two concurrent mutations would end up patching
+    and restoring the same working copy. The victim then tests unmutated
+    source and is recorded as a survivor.
+
+    The queue holds exactly one sandbox per worker, so a timeout here means
+    that invariant broke; fail loudly rather than hang the run.
+    """
+    global _worker_sandbox
+    try:
+        _worker_sandbox = sandbox_queue.get(timeout=SANDBOX_CLAIM_TIMEOUT_SECONDS)
+    except queue.Empty:
+        raise RuntimeError("No sandbox available to claim for this worker") from None
+
+
+def _error_result(mutation: Mutation, detail: str) -> dict:
+    return {
+        "file": mutation.file,
+        "line": mutation.line,
+        "col": mutation.col,
+        "end_col": mutation.end_col,
+        "original": mutation.original,
+        "replacement": mutation.replacement,
+        "operator": mutation.operator,
+        "description": mutation.description,
+        "status": BUILD_ERROR,
+        "duration_seconds": 0.0,
+        "detail": detail,
+    }
+
+
 def _worker_execute_mutation(args: tuple) -> dict:
-    """Execute a single mutation in a sandbox. Returns a serializable result dict."""
+    """Execute a single mutation in this process's sandbox. Returns a result dict."""
     (
-        sandbox_root,
         file_rel,
         original_content,
         mutation_dict,
@@ -194,7 +293,14 @@ def _worker_execute_mutation(args: tuple) -> dict:
         test_timeout,
     ) = args
 
+    sandbox_root = _worker_sandbox
     mutation = Mutation(**mutation_dict)
+
+    if not sandbox_root:
+        # Without this guard file_rel would resolve against the worker's cwd,
+        # writing the mutation into the real sources instead of a sandbox.
+        return _error_result(mutation, "worker has no sandbox assigned")
+
     file_path = os.path.join(sandbox_root, file_rel)
 
     try:
@@ -230,19 +336,7 @@ def _worker_execute_mutation(args: tuple) -> dict:
                 f.write(original_content)
         except Exception:
             pass
-        return {
-            "file": mutation.file,
-            "line": mutation.line,
-            "col": mutation.col,
-            "end_col": mutation.end_col,
-            "original": mutation.original,
-            "replacement": mutation.replacement,
-            "operator": mutation.operator,
-            "description": mutation.description,
-            "status": BUILD_ERROR,
-            "duration_seconds": 0.0,
-            "detail": str(exc),
-        }
+        return _error_result(mutation, str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -327,9 +421,7 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
     lang_operators = cfg.lang_plugin.get("operators", OPERATOR_PRESETS)
     operators = lang_operators[cfg.preset]
     mask_fn = cfg.lang_plugin.get("compute_code_masks", builtin_cpp_code_masks)
-    sources = discover_sources(cfg)
-    if file_filter:
-        sources = [s for s in sources if file_filter in s]
+    sources = select_sources(discover_sources(cfg), file_filter)
     if not sources:
         die("No source files found.")
 
@@ -416,7 +508,9 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
             )
     else:
         # Parallel mode
-        sandboxes = create_sandboxes(cfg.project_root, cfg.build_tree, num_workers)
+        sandboxes = create_sandboxes(
+            cfg.project_root, cfg.build_tree, num_workers, cfg.sandbox_exclude
+        )
         info(f"\nRunning {total_new} mutations ({num_workers} workers)...\n")
 
         # Pre-validation build
@@ -429,9 +523,7 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
         # Prepare work items
         work_items = []
         for mut in all_mutations:
-            worker_idx = len(work_items) % num_workers
             work_items.append((
-                sandboxes[worker_idx],
                 mut.file,
                 file_contents[mut.file],
                 {
@@ -451,7 +543,15 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
             ))
 
         completed = 0
-        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as pool:
+        sandbox_queue: multiprocessing.Queue = multiprocessing.Queue()
+        for sandbox in sandboxes:
+            sandbox_queue.put(sandbox)
+
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_init_worker,
+            initargs=(sandbox_queue,),
+        ) as pool:
             future_to_idx = {pool.submit(_worker_execute_mutation, item): i for i, item in enumerate(work_items)}
             for future in concurrent.futures.as_completed(future_to_idx):
                 completed += 1

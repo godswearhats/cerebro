@@ -2,9 +2,20 @@
 
 import re
 
+import pytest
+
 from cerebro.operators import OperatorDef
 from cerebro.mutation import generate_mutations
+from cerebro.runner import _cleanup_sandboxes
 from cerebro.types import Mutation
+
+
+@pytest.fixture(autouse=True)
+def remove_sandboxes():
+    """Sandboxes are temp trees outside pytest's tmp_path, so a failing assert
+    would otherwise leave them behind in /tmp."""
+    yield
+    _cleanup_sandboxes()
 
 
 def make_op(name: str, pattern: str, replacement: str) -> OperatorDef:

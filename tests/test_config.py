@@ -15,6 +15,7 @@ from cerebro.config import (
     _discover_languages,
     load_language,
     discover_sources,
+    select_sources,
 )
 
 
@@ -400,3 +401,45 @@ class TestDiscoverSources:
             sources = discover_sources(cfg)
             assert len(sources) == 1
             assert "cpp.py" in sources[0]
+
+
+# ── Source selection (--file) ──────────────────────────────────────────
+
+class TestSelectSources:
+    SOURCES = ["src/compress.py", "src/decompress.py", "src/lang/compress.py"]
+
+    def test_no_filter_returns_everything(self):
+        assert select_sources(self.SOURCES, None) == self.SOURCES
+
+    def test_empty_filter_returns_everything(self):
+        assert select_sources(self.SOURCES, "") == self.SOURCES
+
+    def test_exact_relpath_beats_substring(self):
+        assert select_sources(self.SOURCES, "src/compress.py") == ["src/compress.py"]
+
+    def test_basename_beats_substring(self):
+        assert select_sources(self.SOURCES, "compress.py") == [
+            "src/compress.py",
+            "src/lang/compress.py",
+        ]
+
+    def test_substring_used_when_nothing_matches_exactly(self):
+        assert select_sources(self.SOURCES, "compress") == self.SOURCES
+
+    def test_unmatched_filter_selects_nothing(self):
+        assert select_sources(self.SOURCES, "nosuchfile.py") == []
+
+
+class TestSandboxExcludeConfig:
+    def test_defaults_to_empty(self):
+        assert DEFAULT_CONFIG["sandbox_exclude"] == []
+
+    def test_loads_from_config_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "cerebro.json")
+            with open(path, "w") as f:
+                json.dump({"language": "python", "source_dirs": ["src"],
+                           "test_command": "pytest",
+                           "sandbox_exclude": ["tools", "*.rom"]}, f)
+            cfg = Config.load(path)
+            assert cfg.sandbox_exclude == ["tools", "*.rom"]
