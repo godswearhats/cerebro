@@ -428,3 +428,18 @@ class TestSelectSources:
 
     def test_unmatched_filter_selects_nothing(self):
         assert select_sources(self.SOURCES, "nosuchfile.py") == []
+
+
+class TestSandboxExcludeConfig:
+    def test_defaults_to_empty(self):
+        assert DEFAULT_CONFIG["sandbox_exclude"] == []
+
+    def test_loads_from_config_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "cerebro.json")
+            with open(path, "w") as f:
+                json.dump({"language": "python", "source_dirs": ["src"],
+                           "test_command": "pytest",
+                           "sandbox_exclude": ["tools", "*.rom"]}, f)
+            cfg = Config.load(path)
+            assert cfg.sandbox_exclude == ["tools", "*.rom"]

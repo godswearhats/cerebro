@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import concurrent.futures
+import fnmatch
 import hashlib
 import json
 import os
@@ -100,6 +101,14 @@ def _sigint_handler(signum, frame):
     sys.exit(130)
 
 
+DEFAULT_SANDBOX_EXCLUDE = {".git", ".cerebro_cache", ".cerebro_reports", "__pycache__"}
+
+
+def _excluded(name: str, patterns: set[str]) -> bool:
+    """True if a file or directory name matches any exclude pattern (name or glob)."""
+    return any(fnmatch.fnmatch(name, p) for p in patterns)
+
+
 def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclude: set[str]):
     """Recursively copy a directory tree, symlinking named subdirectories at any depth.
 
@@ -108,7 +117,7 @@ def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclud
     """
     os.makedirs(dst_dir, exist_ok=True)
     for entry in os.listdir(src_dir):
-        if entry in exclude:
+        if _excluded(entry, exclude):
             continue
         src = os.path.join(src_dir, entry)
         dst = os.path.join(dst_dir, entry)
@@ -125,7 +134,7 @@ def create_sandboxes(
     project_root: str,
     build_tree: str,
     num_workers: int,
-    exclude: list[str] | None = None,
+    extra_exclude: list[str] | None = None,
 ) -> list[str]:
     """Create N sandbox copies of the project tree for parallel mutation testing.
 
@@ -135,8 +144,11 @@ def create_sandboxes(
 
     Large read-only directories (godot-cpp, extern, godot_cpp) within the
     build tree are symlinked rather than copied to save time and disk.
+
+    extra_exclude adds names or globs to DEFAULT_SANDBOX_EXCLUDE — for keeping
+    bulky directories the tests never read out of every worker's copy.
     """
-    exclude_set = set(exclude or [".git", ".cerebro_cache", ".cerebro_reports", "__pycache__"])
+    exclude_set = DEFAULT_SANDBOX_EXCLUDE | set(extra_exclude or [])
     # Large read-only dirs that can be symlinked inside the build tree
     readonly_dirs = {"godot-cpp", "extern", "godot_cpp"}
     sandboxes: list[str] = []
@@ -149,7 +161,7 @@ def create_sandboxes(
         if build_tree:
             build_tree_top = build_tree.split("/")[0] if "/" in build_tree else build_tree
             for entry in os.listdir(project_root):
-                if entry in exclude_set:
+                if _excluded(entry, exclude_set):
                     continue
                 src = os.path.join(project_root, entry)
                 dst = os.path.join(root_mirror, entry)
@@ -414,7 +426,9 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
             )
     else:
         # Parallel mode
-        sandboxes = create_sandboxes(cfg.project_root, cfg.build_tree, num_workers)
+        sandboxes = create_sandboxes(
+            cfg.project_root, cfg.build_tree, num_workers, cfg.sandbox_exclude
+        )
         info(f"\nRunning {total_new} mutations ({num_workers} workers)...\n")
 
         # Pre-validation build

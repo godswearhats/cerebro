@@ -266,3 +266,62 @@ class TestSmartCopyTree:
                 _smart_copy_tree(src, dst, set(), {".git"})
                 assert not os.path.exists(os.path.join(dst, ".git"))
                 assert os.path.exists(os.path.join(dst, "f.txt"))
+
+
+class TestSandboxExclude:
+    def _project(self, d: str):
+        os.makedirs(os.path.join(d, ".git"))
+        os.makedirs(os.path.join(d, "tools"))
+        with open(os.path.join(d, "tools", "big.bin"), "w") as f:
+            f.write("payload")
+        with open(os.path.join(d, "keep.py"), "w") as f:
+            f.write("x = 1")
+        with open(os.path.join(d, "rom.bin"), "w") as f:
+            f.write("rom")
+
+    def test_extra_exclude_omits_named_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "", 1, extra_exclude=["tools"])[0]
+            assert not os.path.exists(os.path.join(sb, "tools"))
+            assert os.path.exists(os.path.join(sb, "keep.py"))
+            _cleanup_sandboxes()
+
+    def test_extra_exclude_keeps_builtin_excludes(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "", 1, extra_exclude=["tools"])[0]
+            assert not os.path.exists(os.path.join(sb, ".git"))
+            _cleanup_sandboxes()
+
+    def test_extra_exclude_accepts_globs(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "", 1, extra_exclude=["*.bin"])[0]
+            assert not os.path.exists(os.path.join(sb, "rom.bin"))
+            assert os.path.exists(os.path.join(sb, "keep.py"))
+            _cleanup_sandboxes()
+
+    def test_extra_exclude_applies_in_build_tree_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            os.makedirs(os.path.join(d, "src"))
+            with open(os.path.join(d, "src", "main.py"), "w") as f:
+                f.write("x = 1")
+            sb = create_sandboxes(d, "src", 1, extra_exclude=["tools"])[0]
+            assert not os.path.exists(os.path.join(sb, "tools"))
+            assert os.path.exists(os.path.join(sb, "src", "main.py"))
+            _cleanup_sandboxes()
+
+    def test_glob_exclude_applies_inside_copied_build_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            nested = os.path.join(d, "src", "fixtures")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "sample.bin"), "w") as f:
+                f.write("blob")
+            with open(os.path.join(d, "src", "main.py"), "w") as f:
+                f.write("x = 1")
+            sb = create_sandboxes(d, "src", 1, extra_exclude=["*.bin"])[0]
+            assert not os.path.exists(os.path.join(sb, "src", "fixtures", "sample.bin"))
+            assert os.path.exists(os.path.join(sb, "src", "main.py"))
+            _cleanup_sandboxes()

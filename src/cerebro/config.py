@@ -188,6 +188,7 @@ DEFAULT_CONFIG = {
     "workers": 0,
     "build_jobs": 2,
     "build_tree": "",
+    "sandbox_exclude": [],
     "cache_dir": ".cerebro_cache",
     "report_dir": ".cerebro_reports",
 }
@@ -210,6 +211,7 @@ class Config:
     build_tree: str
     cache_dir: str
     report_dir: str
+    sandbox_exclude: list[str] = field(default_factory=list)
     project_root: str = ""  # resolved absolute path to config file's directory
     lang_plugin: dict = field(default_factory=dict)  # loaded language plugin
 
