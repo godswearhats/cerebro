@@ -10,7 +10,7 @@ import sys
 from cerebro.operators import OperatorDef
 from cerebro.types import Mutation, MutationResult
 from cerebro.mutation import generate_mutations
-from cerebro.config import Config, discover_sources, builtin_cpp_code_masks, OPERATOR_PRESETS
+from cerebro.config import Config, discover_sources, select_sources, builtin_cpp_code_masks, OPERATOR_PRESETS
 from cerebro.runner import run_mutations, load_cache
 from cerebro.report import compute_score, report_text, report_json, report_html
 
@@ -65,9 +65,7 @@ def cmd_dry_run(args: argparse.Namespace):
     lang_operators = cfg.lang_plugin.get("operators", OPERATOR_PRESETS)
     operators = lang_operators[cfg.preset]
     mask_fn = cfg.lang_plugin.get("compute_code_masks", builtin_cpp_code_masks)
-    sources = discover_sources(cfg)
-    if args.file:
-        sources = [s for s in sources if args.file in s]
+    sources = select_sources(discover_sources(cfg), args.file)
     if not sources:
         die("No source files found.")
 
@@ -191,13 +189,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--preset", choices=preset_names, help="Override preset")
     p_run.add_argument("--threshold", type=int, help="Override threshold percentage")
     p_run.add_argument("--workers", type=int, help="Number of parallel workers (0=auto, 1=sequential)")
-    p_run.add_argument("--file", help="Only test files matching this substring")
+    p_run.add_argument("--file", help="Only test this file (exact path or name; falls back to substring match)")
 
     # dry-run
     p_dry = sub.add_parser("dry-run", help="List mutations without executing")
     p_dry.add_argument("--config", default="cerebro.json", help="Config file path")
     p_dry.add_argument("--preset", choices=preset_names, help="Override preset")
-    p_dry.add_argument("--file", help="Only scan files matching this substring")
+    p_dry.add_argument("--file", help="Only scan this file (exact path or name; falls back to substring match)")
 
     # list-operators
     p_ops = sub.add_parser("list-operators", help="Show available mutation operators")

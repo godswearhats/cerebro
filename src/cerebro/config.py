@@ -284,6 +284,21 @@ def discover_sources(cfg: Config) -> list[str]:
     return sources
 
 
+def select_sources(sources: list[str], file_filter: str | None) -> list[str]:
+    """Narrow discovered sources to a --file selection.
+
+    An exact relative path or file name wins outright, so `--file compress.py`
+    selects compress.py alone rather than dragging in decompress.py. Substring
+    matching remains the fallback for partial names.
+    """
+    if not file_filter:
+        return list(sources)
+    exact = [s for s in sources if s == file_filter or os.path.basename(s) == file_filter]
+    if exact:
+        return exact
+    return [s for s in sources if file_filter in s]
+
+
 # ---------------------------------------------------------------------------
 # Output helpers (local to avoid circular imports with cli.py)
 # ---------------------------------------------------------------------------

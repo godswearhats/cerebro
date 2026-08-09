@@ -16,7 +16,7 @@ import time
 
 from cerebro.types import Mutation, MutationResult, KILLED, SURVIVED, BUILD_ERROR, TIMEOUT
 from cerebro.mutation import generate_mutations, apply_mutation
-from cerebro.config import Config, discover_sources, builtin_cpp_code_masks, OPERATOR_PRESETS
+from cerebro.config import Config, discover_sources, select_sources, builtin_cpp_code_masks, OPERATOR_PRESETS
 
 
 # ---------------------------------------------------------------------------
@@ -327,9 +327,7 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
     lang_operators = cfg.lang_plugin.get("operators", OPERATOR_PRESETS)
     operators = lang_operators[cfg.preset]
     mask_fn = cfg.lang_plugin.get("compute_code_masks", builtin_cpp_code_masks)
-    sources = discover_sources(cfg)
-    if file_filter:
-        sources = [s for s in sources if file_filter in s]
+    sources = select_sources(discover_sources(cfg), file_filter)
     if not sources:
         die("No source files found.")
 
