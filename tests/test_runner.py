@@ -385,6 +385,68 @@ class TestSandboxExclude:
             _cleanup_sandboxes()
 
 
+class TestPathStyleSandboxExclude:
+    """A pattern containing a separator matches against the relative path.
+
+    Bare names match at any depth, which is what you want for `__pycache__`
+    but not for `assets/generated` — writing a path used to silently match
+    nothing at all.
+    """
+
+    def _project(self, d: str):
+        for sub in ("keep", "drop"):
+            os.makedirs(os.path.join(d, "assets", sub))
+            with open(os.path.join(d, "assets", sub, "f.dat"), "w") as f:
+                f.write("x")
+        os.makedirs(os.path.join(d, "drop"))
+        with open(os.path.join(d, "drop", "f.dat"), "w") as f:
+            f.write("x")
+
+    def test_should_exclude_a_nested_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "", 1, extra_exclude=["assets/drop"])[0]
+            assert not os.path.exists(os.path.join(sb, "assets", "drop"))
+            _cleanup_sandboxes()
+
+    def test_should_keep_siblings_of_an_excluded_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "", 1, extra_exclude=["assets/drop"])[0]
+            assert os.path.exists(os.path.join(sb, "assets", "keep", "f.dat"))
+            _cleanup_sandboxes()
+
+    def test_should_not_let_a_path_pattern_match_a_bare_name_elsewhere(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "", 1, extra_exclude=["assets/drop"])[0]
+            assert os.path.exists(os.path.join(sb, "drop", "f.dat"))
+            _cleanup_sandboxes()
+
+    def test_should_ignore_a_leading_dot_slash_on_a_path_pattern(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "", 1, extra_exclude=["./assets/drop"])[0]
+            assert not os.path.exists(os.path.join(sb, "assets", "drop"))
+            _cleanup_sandboxes()
+
+    def test_should_exclude_a_nested_path_inside_a_copied_build_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "assets", 1, extra_exclude=["assets/drop"])[0]
+            assert not os.path.exists(os.path.join(sb, "assets", "drop"))
+            assert os.path.exists(os.path.join(sb, "assets", "keep", "f.dat"))
+            _cleanup_sandboxes()
+
+    def test_should_still_match_bare_names_at_any_depth(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, "", 1, extra_exclude=["drop"])[0]
+            assert not os.path.exists(os.path.join(sb, "assets", "drop"))
+            assert not os.path.exists(os.path.join(sb, "drop"))
+            _cleanup_sandboxes()
+
+
 # ── Worker/sandbox binding ─────────────────────────────────────────────
 
 def _sandbox_probe(delay: float) -> bool:

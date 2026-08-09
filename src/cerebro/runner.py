@@ -111,9 +111,35 @@ def _sigint_handler(signum, frame):
 DEFAULT_SANDBOX_EXCLUDE = {".git", ".cerebro_cache", ".cerebro_reports", "__pycache__"}
 
 
-def _excluded(name: str, patterns: set[str]) -> bool:
-    """True if a file or directory name matches any exclude pattern (name or glob)."""
-    return any(fnmatch.fnmatch(name, p) for p in patterns)
+def _excluded(name: str, rel_path: str, patterns: set[str]) -> bool:
+    """True if a name or its project-relative path matches any exclude pattern.
+
+    A pattern without a separator matches the bare name at any depth, which is
+    what `__pycache__` wants. A pattern with one is matched against the
+    relative path instead, so `assets/generated` excludes that directory alone
+    rather than every `generated` in the tree.
+    """
+    for pattern in patterns:
+        cleaned = pattern.strip("/")
+        while cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        if not cleaned:
+            continue
+        target = rel_path if "/" in cleaned else name
+        if fnmatch.fnmatch(target, cleaned):
+            return True
+    return False
+
+
+def _sandbox_ignore(project_root: str, exclude_set: set[str]):
+    """shutil.copytree ignore callable that honours path-style patterns."""
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        rel_dir = os.path.relpath(directory, project_root)
+        prefix = "" if rel_dir == "." else rel_dir
+        return {n for n in names if _excluded(n, f"{prefix}/{n}" if prefix else n, exclude_set)}
+
+    return ignore
 
 
 def _normalize_build_tree(build_tree: str) -> str:
@@ -130,7 +156,9 @@ def _normalize_build_tree(build_tree: str) -> str:
     return "" if cleaned == "." else cleaned
 
 
-def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclude: set[str]):
+def _smart_copy_tree(
+    src_dir: str, dst_dir: str, symlink_names: set[str], exclude: set[str], rel_base: str = ""
+):
     """Recursively copy a directory tree, symlinking named subdirectories at any depth.
 
     This significantly reduces sandbox creation time and disk usage for large
@@ -138,7 +166,8 @@ def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclud
     """
     os.makedirs(dst_dir, exist_ok=True)
     for entry in os.listdir(src_dir):
-        if _excluded(entry, exclude):
+        rel = f"{rel_base}/{entry}" if rel_base else entry
+        if _excluded(entry, rel, exclude):
             continue
         src = os.path.join(src_dir, entry)
         dst = os.path.join(dst_dir, entry)
@@ -146,7 +175,7 @@ def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclud
             os.symlink(src, dst)
         elif os.path.isdir(src):
             # Recurse so we can symlink matching dirs at deeper levels
-            _smart_copy_tree(src, dst, symlink_names, exclude)
+            _smart_copy_tree(src, dst, symlink_names, exclude, rel)
         else:
             shutil.copy2(src, dst)
 
@@ -183,13 +212,13 @@ def create_sandboxes(
         if build_tree:
             build_tree_top = build_tree.split("/")[0]
             for entry in os.listdir(project_root):
-                if _excluded(entry, exclude_set):
+                if _excluded(entry, entry, exclude_set):
                     continue
                 src = os.path.join(project_root, entry)
                 dst = os.path.join(root_mirror, entry)
                 if entry == build_tree_top:
                     # Walk the build tree, symlinking read-only deps
-                    _smart_copy_tree(src, dst, readonly_dirs, exclude_set)
+                    _smart_copy_tree(src, dst, readonly_dirs, exclude_set, entry)
                 else:
                     os.symlink(src, dst)
         else:
@@ -198,7 +227,7 @@ def create_sandboxes(
                 root_mirror,
                 symlinks=True,
                 dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns(*exclude_set),
+                ignore=_sandbox_ignore(project_root, exclude_set),
             )
 
         sandboxes.append(root_mirror)
