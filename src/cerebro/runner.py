@@ -9,6 +9,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -243,6 +244,8 @@ def create_sandboxes(
 
 _worker_sandbox: str = ""
 
+SANDBOX_CLAIM_TIMEOUT_SECONDS = 60
+
 
 def _init_worker(sandbox_queue):
     """Claim one sandbox for the lifetime of this pool process.
@@ -251,9 +254,31 @@ def _init_worker(sandbox_queue):
     any item in any process, so two concurrent mutations would end up patching
     and restoring the same working copy. The victim then tests unmutated
     source and is recorded as a survivor.
+
+    The queue holds exactly one sandbox per worker, so a timeout here means
+    that invariant broke; fail loudly rather than hang the run.
     """
     global _worker_sandbox
-    _worker_sandbox = sandbox_queue.get()
+    try:
+        _worker_sandbox = sandbox_queue.get(timeout=SANDBOX_CLAIM_TIMEOUT_SECONDS)
+    except queue.Empty:
+        raise RuntimeError("No sandbox available to claim for this worker") from None
+
+
+def _error_result(mutation: Mutation, detail: str) -> dict:
+    return {
+        "file": mutation.file,
+        "line": mutation.line,
+        "col": mutation.col,
+        "end_col": mutation.end_col,
+        "original": mutation.original,
+        "replacement": mutation.replacement,
+        "operator": mutation.operator,
+        "description": mutation.description,
+        "status": BUILD_ERROR,
+        "duration_seconds": 0.0,
+        "detail": detail,
+    }
 
 
 def _worker_execute_mutation(args: tuple) -> dict:
@@ -270,6 +295,12 @@ def _worker_execute_mutation(args: tuple) -> dict:
 
     sandbox_root = _worker_sandbox
     mutation = Mutation(**mutation_dict)
+
+    if not sandbox_root:
+        # Without this guard file_rel would resolve against the worker's cwd,
+        # writing the mutation into the real sources instead of a sandbox.
+        return _error_result(mutation, "worker has no sandbox assigned")
+
     file_path = os.path.join(sandbox_root, file_rel)
 
     try:
@@ -305,19 +336,7 @@ def _worker_execute_mutation(args: tuple) -> dict:
                 f.write(original_content)
         except Exception:
             pass
-        return {
-            "file": mutation.file,
-            "line": mutation.line,
-            "col": mutation.col,
-            "end_col": mutation.end_col,
-            "original": mutation.original,
-            "replacement": mutation.replacement,
-            "operator": mutation.operator,
-            "description": mutation.description,
-            "status": BUILD_ERROR,
-            "duration_seconds": 0.0,
-            "detail": str(exc),
-        }
+        return _error_result(mutation, str(exc))
 
 
 # ---------------------------------------------------------------------------

@@ -19,10 +19,11 @@ from cerebro.runner import (
     create_sandboxes,
     run_command,
     _init_worker,
-    _cleanup_sandboxes,
+    _worker_execute_mutation,
     _active_sandboxes,
     _smart_copy_tree,
 )
+from cerebro import runner
 from cerebro.config import Config
 
 
@@ -223,7 +224,6 @@ class TestCreateSandboxes:
             for sb in sandboxes:
                 assert os.path.isdir(sb)
                 assert os.path.exists(os.path.join(sb, "foo.py"))
-            _cleanup_sandboxes()
 
     def test_build_tree_symlinks_other_dirs(self):
         with tempfile.TemporaryDirectory() as d:
@@ -240,7 +240,6 @@ class TestCreateSandboxes:
             # src should be copied (not symlinked)
             assert not os.path.islink(os.path.join(sb, "src"))
             assert os.path.exists(os.path.join(sb, "src", "main.py"))
-            _cleanup_sandboxes()
 
 
 class TestWholeRepoBuildTree:
@@ -263,7 +262,6 @@ class TestWholeRepoBuildTree:
             self._project(d)
             sb = create_sandboxes(d, build_tree, 1)[0]
             assert not os.path.islink(os.path.join(sb, "src"))
-            _cleanup_sandboxes()
 
     @pytest.mark.parametrize("build_tree", WHOLE_REPO)
     def test_should_isolate_sandbox_writes_from_the_real_project(self, build_tree):
@@ -274,7 +272,6 @@ class TestWholeRepoBuildTree:
                 f.write("MUTATED")
             with open(os.path.join(d, "src", "main.py")) as f:
                 assert f.read() == "x = 1"
-            _cleanup_sandboxes()
 
     @pytest.mark.parametrize("build_tree", WHOLE_REPO)
     def test_should_give_each_worker_an_independent_copy(self, build_tree):
@@ -285,7 +282,6 @@ class TestWholeRepoBuildTree:
                 f.write("MUTATED")
             with open(os.path.join(second, "src", "main.py")) as f:
                 assert f.read() == "x = 1"
-            _cleanup_sandboxes()
 
     def test_should_treat_a_dot_slash_prefixed_subtree_as_that_subtree(self):
         with tempfile.TemporaryDirectory() as d:
@@ -294,7 +290,6 @@ class TestWholeRepoBuildTree:
             sb = create_sandboxes(d, "./src", 1)[0]
             assert not os.path.islink(os.path.join(sb, "src"))
             assert os.path.islink(os.path.join(sb, "deps"))
-            _cleanup_sandboxes()
 
 
 class TestSmartCopyTree:
@@ -343,14 +338,12 @@ class TestSandboxExclude:
             sb = create_sandboxes(d, "", 1, extra_exclude=["tools"])[0]
             assert not os.path.exists(os.path.join(sb, "tools"))
             assert os.path.exists(os.path.join(sb, "keep.py"))
-            _cleanup_sandboxes()
 
     def test_extra_exclude_keeps_builtin_excludes(self):
         with tempfile.TemporaryDirectory() as d:
             self._project(d)
             sb = create_sandboxes(d, "", 1, extra_exclude=["tools"])[0]
             assert not os.path.exists(os.path.join(sb, ".git"))
-            _cleanup_sandboxes()
 
     def test_extra_exclude_accepts_globs(self):
         with tempfile.TemporaryDirectory() as d:
@@ -358,7 +351,6 @@ class TestSandboxExclude:
             sb = create_sandboxes(d, "", 1, extra_exclude=["*.bin"])[0]
             assert not os.path.exists(os.path.join(sb, "rom.bin"))
             assert os.path.exists(os.path.join(sb, "keep.py"))
-            _cleanup_sandboxes()
 
     def test_extra_exclude_applies_in_build_tree_mode(self):
         with tempfile.TemporaryDirectory() as d:
@@ -369,7 +361,6 @@ class TestSandboxExclude:
             sb = create_sandboxes(d, "src", 1, extra_exclude=["tools"])[0]
             assert not os.path.exists(os.path.join(sb, "tools"))
             assert os.path.exists(os.path.join(sb, "src", "main.py"))
-            _cleanup_sandboxes()
 
     def test_glob_exclude_applies_inside_copied_build_tree(self):
         with tempfile.TemporaryDirectory() as d:
@@ -382,7 +373,6 @@ class TestSandboxExclude:
             sb = create_sandboxes(d, "src", 1, extra_exclude=["*.bin"])[0]
             assert not os.path.exists(os.path.join(sb, "src", "fixtures", "sample.bin"))
             assert os.path.exists(os.path.join(sb, "src", "main.py"))
-            _cleanup_sandboxes()
 
 
 class TestPathStyleSandboxExclude:
@@ -407,28 +397,24 @@ class TestPathStyleSandboxExclude:
             self._project(d)
             sb = create_sandboxes(d, "", 1, extra_exclude=["assets/drop"])[0]
             assert not os.path.exists(os.path.join(sb, "assets", "drop"))
-            _cleanup_sandboxes()
 
     def test_should_keep_siblings_of_an_excluded_path(self):
         with tempfile.TemporaryDirectory() as d:
             self._project(d)
             sb = create_sandboxes(d, "", 1, extra_exclude=["assets/drop"])[0]
             assert os.path.exists(os.path.join(sb, "assets", "keep", "f.dat"))
-            _cleanup_sandboxes()
 
     def test_should_not_let_a_path_pattern_match_a_bare_name_elsewhere(self):
         with tempfile.TemporaryDirectory() as d:
             self._project(d)
             sb = create_sandboxes(d, "", 1, extra_exclude=["assets/drop"])[0]
             assert os.path.exists(os.path.join(sb, "drop", "f.dat"))
-            _cleanup_sandboxes()
 
     def test_should_ignore_a_leading_dot_slash_on_a_path_pattern(self):
         with tempfile.TemporaryDirectory() as d:
             self._project(d)
             sb = create_sandboxes(d, "", 1, extra_exclude=["./assets/drop"])[0]
             assert not os.path.exists(os.path.join(sb, "assets", "drop"))
-            _cleanup_sandboxes()
 
     def test_should_exclude_a_nested_path_inside_a_copied_build_tree(self):
         with tempfile.TemporaryDirectory() as d:
@@ -436,7 +422,6 @@ class TestPathStyleSandboxExclude:
             sb = create_sandboxes(d, "assets", 1, extra_exclude=["assets/drop"])[0]
             assert not os.path.exists(os.path.join(sb, "assets", "drop"))
             assert os.path.exists(os.path.join(sb, "assets", "keep", "f.dat"))
-            _cleanup_sandboxes()
 
     def test_should_still_match_bare_names_at_any_depth(self):
         with tempfile.TemporaryDirectory() as d:
@@ -444,7 +429,6 @@ class TestPathStyleSandboxExclude:
             sb = create_sandboxes(d, "", 1, extra_exclude=["drop"])[0]
             assert not os.path.exists(os.path.join(sb, "assets", "drop"))
             assert not os.path.exists(os.path.join(sb, "drop"))
-            _cleanup_sandboxes()
 
 
 # ── Worker/sandbox binding ─────────────────────────────────────────────
@@ -495,7 +479,6 @@ class TestWorkerSandboxBinding:
             delays = [0.6] + [0.01] * 39
             with self._pool(d) as pool:
                 collisions = list(pool.map(_sandbox_probe, delays))
-            _cleanup_sandboxes()
             assert not any(collisions)
 
     def test_each_process_owns_one_distinct_sandbox(self):
@@ -503,8 +486,47 @@ class TestWorkerSandboxBinding:
             open(os.path.join(d, "f.py"), "w").close()
             with self._pool(d) as pool:
                 seen = dict(pool.map(_report_binding, range(40)))
-            _cleanup_sandboxes()
             assert len(set(seen.values())) == len(seen)
+
+
+class TestSandboxClaim:
+    def test_should_raise_rather_than_block_when_no_sandbox_is_free(self, monkeypatch):
+        monkeypatch.setattr(runner, "SANDBOX_CLAIM_TIMEOUT_SECONDS", 0.1)
+        with pytest.raises(RuntimeError):
+            _init_worker(multiprocessing.Queue())
+
+
+class TestUnboundWorker:
+    """An unclaimed sandbox must not fall back to a project-relative path.
+
+    os.path.join("", "src/x.py") is "src/x.py", which resolves against the
+    worker's cwd — the real project — so a missed initializer would write
+    mutations straight into the sources under test.
+    """
+
+    ITEM = (
+        "src/x.py", "x = 1",
+        {"file": "src/x.py", "line": 1, "col": 0, "end_col": 1,
+         "original": "1", "replacement": "2", "operator": "op", "description": "d"},
+        "", "true", 10, 10,
+    )
+
+    def test_should_report_an_error_rather_than_run(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(runner, "_worker_sandbox", "")
+        monkeypatch.chdir(tmp_path)
+        assert _worker_execute_mutation(self.ITEM)["status"] == BUILD_ERROR
+
+    def test_should_not_touch_a_cwd_relative_source_file(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(runner, "_worker_sandbox", "")
+        monkeypatch.chdir(tmp_path)
+        os.makedirs(tmp_path / "src")
+        _worker_execute_mutation(self.ITEM)
+        assert not (tmp_path / "src" / "x.py").exists()
+
+    def test_should_say_the_sandbox_is_unassigned(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(runner, "_worker_sandbox", "")
+        monkeypatch.chdir(tmp_path)
+        assert "sandbox" in _worker_execute_mutation(self.ITEM)["detail"].lower()
 
 
 class TestRunCommandEnvironment:
