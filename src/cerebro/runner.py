@@ -116,6 +116,20 @@ def _excluded(name: str, patterns: set[str]) -> bool:
     return any(fnmatch.fnmatch(name, p) for p in patterns)
 
 
+def _normalize_build_tree(build_tree: str) -> str:
+    """Reduce a build_tree to a plain relative path; "" means the whole repo.
+
+    `.` and `./` are the documented way to say "whole repo", but they used to
+    reach the subtree branch below, where `os.listdir` never yields an entry
+    named `.` — so every entry was symlinked and each worker mutated the real
+    tree instead of its own copy.
+    """
+    cleaned = build_tree.strip().strip("/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return "" if cleaned == "." else cleaned
+
+
 def _smart_copy_tree(src_dir: str, dst_dir: str, symlink_names: set[str], exclude: set[str]):
     """Recursively copy a directory tree, symlinking named subdirectories at any depth.
 
@@ -156,6 +170,7 @@ def create_sandboxes(
     bulky directories the tests never read out of every worker's copy.
     """
     exclude_set = DEFAULT_SANDBOX_EXCLUDE | set(extra_exclude or [])
+    build_tree = _normalize_build_tree(build_tree)
     # Large read-only dirs that can be symlinked inside the build tree
     readonly_dirs = {"godot-cpp", "extern", "godot_cpp"}
     sandboxes: list[str] = []
@@ -166,7 +181,7 @@ def create_sandboxes(
         os.makedirs(root_mirror)
 
         if build_tree:
-            build_tree_top = build_tree.split("/")[0] if "/" in build_tree else build_tree
+            build_tree_top = build_tree.split("/")[0]
             for entry in os.listdir(project_root):
                 if _excluded(entry, exclude_set):
                     continue
@@ -174,10 +189,7 @@ def create_sandboxes(
                 dst = os.path.join(root_mirror, entry)
                 if entry == build_tree_top:
                     # Walk the build tree, symlinking read-only deps
-                    if build_tree_top == build_tree:
-                        _smart_copy_tree(src, dst, readonly_dirs, exclude_set)
-                    else:
-                        _smart_copy_tree(src, dst, readonly_dirs, exclude_set)
+                    _smart_copy_tree(src, dst, readonly_dirs, exclude_set)
                 else:
                     os.symlink(src, dst)
         else:

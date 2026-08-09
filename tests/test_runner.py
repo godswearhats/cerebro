@@ -243,6 +243,60 @@ class TestCreateSandboxes:
             _cleanup_sandboxes()
 
 
+class TestWholeRepoBuildTree:
+    """`build_tree` values meaning "the whole repo" must copy, never symlink.
+
+    A symlinked sandbox points every worker at the real tree, so concurrent
+    mutations overwrite each other and the run reports phantom survivors.
+    """
+
+    WHOLE_REPO = ["", ".", "./"]
+
+    def _project(self, d: str):
+        os.makedirs(os.path.join(d, "src"))
+        with open(os.path.join(d, "src", "main.py"), "w") as f:
+            f.write("x = 1")
+
+    @pytest.mark.parametrize("build_tree", WHOLE_REPO)
+    def test_should_copy_sources_rather_than_symlink_them(self, build_tree):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, build_tree, 1)[0]
+            assert not os.path.islink(os.path.join(sb, "src"))
+            _cleanup_sandboxes()
+
+    @pytest.mark.parametrize("build_tree", WHOLE_REPO)
+    def test_should_isolate_sandbox_writes_from_the_real_project(self, build_tree):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            sb = create_sandboxes(d, build_tree, 1)[0]
+            with open(os.path.join(sb, "src", "main.py"), "w") as f:
+                f.write("MUTATED")
+            with open(os.path.join(d, "src", "main.py")) as f:
+                assert f.read() == "x = 1"
+            _cleanup_sandboxes()
+
+    @pytest.mark.parametrize("build_tree", WHOLE_REPO)
+    def test_should_give_each_worker_an_independent_copy(self, build_tree):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            first, second = create_sandboxes(d, build_tree, 2)
+            with open(os.path.join(first, "src", "main.py"), "w") as f:
+                f.write("MUTATED")
+            with open(os.path.join(second, "src", "main.py")) as f:
+                assert f.read() == "x = 1"
+            _cleanup_sandboxes()
+
+    def test_should_treat_a_dot_slash_prefixed_subtree_as_that_subtree(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._project(d)
+            os.makedirs(os.path.join(d, "deps"))
+            sb = create_sandboxes(d, "./src", 1)[0]
+            assert not os.path.islink(os.path.join(sb, "src"))
+            assert os.path.islink(os.path.join(sb, "deps"))
+            _cleanup_sandboxes()
+
+
 class TestSmartCopyTree:
     def test_copies_files(self):
         with tempfile.TemporaryDirectory() as src:
