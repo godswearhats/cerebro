@@ -523,6 +523,16 @@ class TestUnboundWorker:
         _worker_execute_mutation(self.ITEM)
         assert not (tmp_path / "src" / "x.py").exists()
 
+    def test_should_return_a_result_dict_when_the_mutation_cannot_be_written(
+        self, monkeypatch, tmp_path
+    ):
+        # run_mutations indexes the returned dict directly, so an unexpected
+        # failure here must still produce a full record rather than None.
+        monkeypatch.setattr(runner, "_worker_sandbox", str(tmp_path))
+        result = _worker_execute_mutation(self.ITEM)
+        assert result["status"] == BUILD_ERROR
+        assert result["file"] == "src/x.py"
+
     def test_should_say_the_sandbox_is_unassigned(self, monkeypatch, tmp_path):
         monkeypatch.setattr(runner, "_worker_sandbox", "")
         monkeypatch.chdir(tmp_path)
