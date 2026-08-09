@@ -55,10 +55,15 @@ See `cerebro.example.json` for all options:
 - **exclude_patterns** — files to skip
 - **build_command** — how to compile your project (required for compiled languages)
 - **test_command** — how to run your test suite
-- **build_tree** — subtree to copy for parallel sandboxes (`.` for whole repo)
-- **sandbox_exclude** — extra names or globs to leave out of each worker's copy,
-  on top of `.git`/`__pycache__`/cerebro's own dirs. Use it for bulky directories
-  the tests never read (asset dumps, vendored toolchains).
+- **build_tree** — subtree to copy for parallel sandboxes; `""` or `.` for the
+  whole repo. Anything outside the subtree is symlinked into each sandbox
+  rather than copied, so name a subtree only when the rest of the repo is
+  read-only during a test run.
+- **sandbox_exclude** — extra entries to leave out of each worker's copy, on top
+  of `.git`/`__pycache__`/cerebro's own dirs. Use it for bulky directories the
+  tests never read (asset dumps, vendored toolchains). A bare name or glob
+  (`build`, `*.rom`) matches at any depth; include a `/` to pin it to one
+  location (`assets/generated`).
 - **preset** — mutation operator set (`STANDARD`, `STRONGER`, `ALL`)
 - **threshold** — minimum kill rate percentage to pass
 - **workers** — `0` for auto (CPU count), `1` for deterministic single-threaded
