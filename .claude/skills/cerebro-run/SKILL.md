@@ -16,7 +16,7 @@ Run mutation testing on Cerebro's own Python source using the `python` language 
    {
      "language": "python",
      "source_dirs": ["src"],
-     "exclude_patterns": ["__pycache__"],
+     "exclude_patterns": ["__pycache__", "lang/python.py"],
      "test_command": "PYTHONPATH=src /home/aj/.local/bin/pytest tests/ -x -q",
      "test_timeout_seconds": 30,
      "preset": "STANDARD",
@@ -27,7 +27,12 @@ Run mutation testing on Cerebro's own Python source using the `python` language 
    ```
 
 2. If the user provides a preset argument, use that preset (STANDARD, STRONGER, or ALL).
-3. If the user provides a file filter, pass `--file <filter>` to scope the run.
+3. If the user provides a file filter, pass `--file <filter>` to scope the run. An exact
+   relative path or file name wins outright; a partial string still matches as a substring,
+   so `--file lang/` scopes to a directory.
+
+Note: `build_tree` is absent here, which means the whole repo is copied per worker — that
+is what you want. It is also correct to write `"."`.
 
 ## Execution
 
