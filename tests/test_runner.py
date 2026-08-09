@@ -7,14 +7,18 @@ import tempfile
 import pytest
 
 from cerebro.types import Mutation, MutationResult, KILLED, SURVIVED, BUILD_ERROR, TIMEOUT
+import concurrent.futures
+import multiprocessing
+
 from cerebro.runner import (
-    run_command,
     classify_outcome,
     inject_build_jobs,
     file_hash,
     load_cache,
     save_cache,
     create_sandboxes,
+    run_command,
+    _init_worker,
     _cleanup_sandboxes,
     _active_sandboxes,
     _smart_copy_tree,
@@ -325,3 +329,79 @@ class TestSandboxExclude:
             assert not os.path.exists(os.path.join(sb, "src", "fixtures", "sample.bin"))
             assert os.path.exists(os.path.join(sb, "src", "main.py"))
             _cleanup_sandboxes()
+
+
+# ── Worker/sandbox binding ─────────────────────────────────────────────
+
+def _sandbox_probe(delay: float) -> bool:
+    """Claim this process's sandbox exclusively; True if someone else held it."""
+    import time
+
+    from cerebro import runner as _r
+
+    marker = os.path.join(_r._worker_sandbox, ".busy")
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return True
+    try:
+        time.sleep(delay)
+    finally:
+        os.close(fd)
+        os.unlink(marker)
+    return False
+
+
+def _report_binding(_: int) -> tuple[int, str]:
+    from cerebro import runner as _r
+
+    return os.getpid(), _r._worker_sandbox
+
+
+class TestWorkerSandboxBinding:
+    WORKERS = 4
+
+    def _pool(self, project: str):
+        boxes = create_sandboxes(project, "", self.WORKERS)
+        q = multiprocessing.Queue()
+        for b in boxes:
+            q.put(b)
+        return concurrent.futures.ProcessPoolExecutor(
+            max_workers=self.WORKERS, initializer=_init_worker, initargs=(q,)
+        )
+
+    def test_concurrent_tasks_never_share_a_sandbox(self):
+        # One long task while the pool churns through short ones. Under
+        # index-based assignment the churn wraps back onto the long task's
+        # sandbox and clobbers the mutation it is still testing.
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "f.py"), "w").close()
+            delays = [0.6] + [0.01] * 39
+            with self._pool(d) as pool:
+                collisions = list(pool.map(_sandbox_probe, delays))
+            _cleanup_sandboxes()
+            assert not any(collisions)
+
+    def test_each_process_owns_one_distinct_sandbox(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "f.py"), "w").close()
+            with self._pool(d) as pool:
+                seen = dict(pool.map(_report_binding, range(40)))
+            _cleanup_sandboxes()
+            assert len(set(seen.values())) == len(seen)
+
+
+class TestRunCommandEnvironment:
+    ENV_PROBE = (
+        "python3 -c \"import os; print(os.environ.get('PYTHONDONTWRITEBYTECODE'))\""
+    )
+
+    def test_disables_bytecode_writing_by_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run_command(self.ENV_PROBE, d, 30)
+            assert out.strip() == "1"
+
+    def test_explicit_env_still_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, out = run_command(self.ENV_PROBE, d, 30, env={"PYTHONDONTWRITEBYTECODE": ""})
+            assert out.strip() == ""

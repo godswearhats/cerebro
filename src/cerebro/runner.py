@@ -7,6 +7,7 @@ import concurrent.futures
 import fnmatch
 import hashlib
 import json
+import multiprocessing
 import os
 import shutil
 import signal
@@ -26,8 +27,14 @@ from cerebro.config import Config, discover_sources, select_sources, builtin_cpp
 
 
 def run_command(command: str, cwd: str, timeout: int, env: dict | None = None) -> tuple[int, str]:
-    """Run a shell command, return (exit_code, combined output). -1 on timeout."""
-    merged_env = {**os.environ, **(env or {})}
+    """Run a shell command, return (exit_code, combined output). -1 on timeout.
+
+    Bytecode writing is disabled: CPython treats a .pyc as fresh when the
+    source's (mtime, size) match, and mutations of equal size applied within
+    the same second reuse the previous mutation's cached bytecode. The test
+    then runs against code that was never mutated and reports a survivor.
+    """
+    merged_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", **(env or {})}
     try:
         proc = subprocess.run(
             command,
@@ -193,10 +200,24 @@ def create_sandboxes(
 # ---------------------------------------------------------------------------
 
 
+_worker_sandbox: str = ""
+
+
+def _init_worker(sandbox_queue):
+    """Claim one sandbox for the lifetime of this pool process.
+
+    Sandboxes must not be handed out per work item: the pool is free to run
+    any item in any process, so two concurrent mutations would end up patching
+    and restoring the same working copy. The victim then tests unmutated
+    source and is recorded as a survivor.
+    """
+    global _worker_sandbox
+    _worker_sandbox = sandbox_queue.get()
+
+
 def _worker_execute_mutation(args: tuple) -> dict:
-    """Execute a single mutation in a sandbox. Returns a serializable result dict."""
+    """Execute a single mutation in this process's sandbox. Returns a result dict."""
     (
-        sandbox_root,
         file_rel,
         original_content,
         mutation_dict,
@@ -206,6 +227,7 @@ def _worker_execute_mutation(args: tuple) -> dict:
         test_timeout,
     ) = args
 
+    sandbox_root = _worker_sandbox
     mutation = Mutation(**mutation_dict)
     file_path = os.path.join(sandbox_root, file_rel)
 
@@ -441,9 +463,7 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
         # Prepare work items
         work_items = []
         for mut in all_mutations:
-            worker_idx = len(work_items) % num_workers
             work_items.append((
-                sandboxes[worker_idx],
                 mut.file,
                 file_contents[mut.file],
                 {
@@ -463,7 +483,15 @@ def run_mutations(cfg: Config, file_filter: str | None = None) -> list[MutationR
             ))
 
         completed = 0
-        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as pool:
+        sandbox_queue: multiprocessing.Queue = multiprocessing.Queue()
+        for sandbox in sandboxes:
+            sandbox_queue.put(sandbox)
+
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_init_worker,
+            initargs=(sandbox_queue,),
+        ) as pool:
             future_to_idx = {pool.submit(_worker_execute_mutation, item): i for i, item in enumerate(work_items)}
             for future in concurrent.futures.as_completed(future_to_idx):
                 completed += 1
