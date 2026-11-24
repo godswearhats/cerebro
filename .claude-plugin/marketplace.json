@@ -1,0 +1,11 @@
+{
+  "name": "cerebro-plugins",
+  "owner": { "name": "godswearhats" },
+  "plugins": [
+    {
+      "name": "cerebro",
+      "source": "./",
+      "description": "Mutation testing with cerebro: run it on any project and write tests that kill the surviving mutants"
+    }
+  ]
+}

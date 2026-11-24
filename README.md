@@ -85,3 +85,53 @@ Each language adds its own operators on top of the shared set (e.g. TypeScript a
 3. For each mutation, copies the build tree to a sandbox, patches the source, builds, and runs tests
 4. If tests still pass -> **survived** (potential gap). If tests fail -> **killed** (good).
 5. Results are cached by file content hash for incremental re-runs
+
+## Claude Code skills
+
+This repository is also a [Claude Code](https://claude.com/claude-code) plugin, so Claude can run cerebro on your project and write tests for the survivors.
+
+Install it from inside Claude Code:
+
+```
+/plugin install cerebro --marketplace godswearhats/cerebro
+```
+
+On older versions of Claude Code, use the two-step form:
+
+```
+/plugin marketplace add godswearhats/cerebro
+/plugin install cerebro@cerebro-plugins
+```
+
+| Skill | What it does |
+|-------|--------------|
+| `/cerebro:mutation-test [preset] [file-filter]` | Creates `cerebro.json` if the project has none, checks the test suite passes, runs cerebro and summarises the kill rate per file |
+| `/cerebro:kill-mutants [file-filter]` | Reads the latest report, works out why each mutant survived and writes tests that kill them |
+
+The skills call the `cerebro` command, so it must be installed in the Python environment Claude runs in. If it is missing, `/cerebro:mutation-test` offers to install it from the plugin's own copy.
+
+To offer the plugin to everyone working in one of your repositories, add this to that repository's `.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "cerebro-plugins": {
+      "source": { "source": "github", "repo": "godswearhats/cerebro" }
+    }
+  },
+  "enabledPlugins": {
+    "cerebro@cerebro-plugins": true
+  }
+}
+```
+
+If you work from a fork or an internal mirror, replace `godswearhats/cerebro` with its location.
+
+### Contributing to cerebro
+
+Two more skills in `.claude/skills/` load automatically when Claude Code is opened in this repository:
+
+| Skill | What it does |
+|-------|--------------|
+| `/cerebro-dogfood [preset] [file-filter]` | Runs cerebro on its own source and writes tests for the survivors |
+| `/cerebro-plugin <language>` | Walks through adding a language plugin in `src/cerebro/lang/` |

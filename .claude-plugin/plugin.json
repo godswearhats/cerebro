@@ -1,0 +1,9 @@
+{
+  "name": "cerebro",
+  "version": "0.1.0",
+  "description": "Mutation testing with cerebro: run it on any project and write tests that kill the surviving mutants",
+  "author": { "name": "godswearhats" },
+  "homepage": "https://github.com/godswearhats/cerebro",
+  "repository": "https://github.com/godswearhats/cerebro",
+  "license": "MIT"
+}
