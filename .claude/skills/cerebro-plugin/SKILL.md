@@ -1,12 +1,17 @@
 ---
 name: cerebro-plugin
-description: Create a new Cerebro language plugin for mutation testing
+description: Add support for a new programming language to cerebro by creating a language plugin in src/cerebro/lang/. For contributors working in the cerebro repository itself.
 argument-hint: "<language-name>"
-allowed-tools: Bash Read Write Edit Grep Glob
+allowed-tools:
+  - Read
+  - Grep
+  - Glob
 disable-model-invocation: true
 ---
 
 # Create a Cerebro Language Plugin
+
+Language: `$ARGUMENTS`
 
 Create a new language plugin for Cerebro at `src/cerebro/lang/<language>.py`. Cerebro auto-discovers plugins from this directory — no registration needed.
 
@@ -88,8 +93,8 @@ The shared operators use lowercase `true`/`false`. Languages with different casi
 
 ## After Creating the Plugin
 
-1. Verify it loads: `PYTHONPATH=src python -c "from cerebro.lang.<name> import LANGUAGE; print(LANGUAGE['name'])"`
-2. Verify discovery: `PYTHONPATH=src python -c "from cerebro.config import load_language; print(load_language('<name>')['name'])"`
+1. Verify it loads: `PYTHONPATH=src python3 -c "from cerebro.lang.<name> import LANGUAGE; print(LANGUAGE['name'])"`
+2. Verify discovery: `PYTHONPATH=src python3 -c "from cerebro.config import load_language; print(load_language('<name>')['name'])"`
 3. Test masking on sample code
 4. Test mutation generation on a real file
 5. Write tests in `tests/test_<name>_plugin.py` covering:
@@ -97,7 +102,7 @@ The shared operators use lowercase `true`/`false`. Languages with different casi
    - Code masking (comments, strings, escapes, multi-line, decorators)
    - Each operator category (pattern matches, replacements, negative cases)
    - Integration: `generate_mutations()` on sample code
-6. Run `/cerebro-run` to dogfood it
+6. Run `/cerebro-dogfood` to dogfood it
 
 ## Reference: Existing Plugins
 
